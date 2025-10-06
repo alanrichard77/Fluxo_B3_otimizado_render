@@ -18,7 +18,7 @@
 
 <main class="max-w-7xl mx-auto px-4 py-8 space-y-8">
 
-  <!-- Filtro: só data inicial; a final é sempre o último dado da base -->
+  <!-- Filtro: só data inicial; a final é sempre o último dado (considerando delay B3) -->
   <form method="GET" class="flex flex-col md:flex-row items-center gap-3 justify-center">
     <div class="flex items-center gap-2">
       <label for="start_date" class="text-sm text-slate-300">Início</label>
@@ -52,7 +52,7 @@
   </div>
   {% endif %}
 
-  <!-- Resumos objetivos após o gráfico -->
+  <!-- Resumos objetivos -->
   <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div class="bg-[#0b1220] border border-slate-700 rounded-xl p-4">
       <h2 class="text-lg font-semibold mb-2">Movimentação do último dia disponível</h2>
