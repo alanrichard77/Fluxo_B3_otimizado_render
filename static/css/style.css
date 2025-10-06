@@ -1,0 +1,7 @@
+body { font-family: Arial, sans-serif; background-color: #f4f4f4; }
+.container { max-width: 800px; margin: 60px auto; background: white; padding: 40px; border-radius: 10px; text-align: center; }
+input[type="password"] { padding: 10px; width: 60%; margin-bottom: 15px; }
+button { padding: 10px 25px; font-size: 16px; background-color: #152955; color: white; border: none; border-radius: 5px; cursor: pointer; }
+button:hover { background-color: #1d3a7a; }
+.erro { color: red; font-weight: bold; }
+.grafico img { max-width: 100%; border: 1px solid #ccc; margin-top: 20px; border-radius: 5px; }
