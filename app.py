@@ -9,6 +9,7 @@ from typing import Dict, Tuple
 
 import pandas as pd
 import numpy as np
+from pandas.tseries.offsets import BDay
 from flask import Flask, render_template, request
 import matplotlib
 matplotlib.use("Agg")
@@ -16,7 +17,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.dates as mdates
 
-# --- Flask com caminhos explícitos (evita TemplateNotFound no Render) ---
+# --- Flask com caminhos explícitos ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
     __name__,
@@ -33,6 +34,9 @@ logger = logging.getLogger("fluxo-b3")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Delay padrão de divulgação da B3 (pode ajustar via variável de ambiente)
+B3_DELAY_DAYS = int(os.getenv("B3_DELAY_DAYS", "2"))
 
 CATEGORIAS = ["Estrangeiro", "Institucional", "Pessoa Física", "Inst. Financeira", "Outros"]
 
@@ -59,6 +63,7 @@ def fetch_fluxo_b3(start: str, end: str) -> pd.DataFrame:
     """
     Em produção, troque por coleta real da B3/Dados de Mercado.
     Fallback offline: gera série acumulada coerente por categoria em R$ bi.
+    (Sem suavização para não distorcer saldos.)
     """
     key = f"fluxo_{start}_{end}"
     cached = _cache_get(key)
@@ -80,7 +85,6 @@ def fetch_fluxo_b3(start: str, end: str) -> pd.DataFrame:
     base["Pessoa Física"]    = np.cumsum(np.random.normal(0.01, 0.05, len(idx))) + 2
     base["Inst. Financeira"] = np.cumsum(np.random.normal(0.006, 0.04, len(idx))) + 1
     base["Outros"]           = np.cumsum(np.random.normal(0.00, 0.03, len(idx))) + 0.5
-    base[CATEGORIAS] = base[CATEGORIAS].rolling(5, min_periods=1).mean()
 
     _cache_set(key, base.assign(data=base["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
     return base
@@ -116,9 +120,6 @@ def thousand_dot(x, pos=None):
     except Exception:
         s = str(x)
     return s
-
-def round_to_step(value, step):
-    return step * math.floor(value / step), step * math.ceil(value / step)
 
 # ----------------- Regras de negócio -----------------
 def rebase_period(df: pd.DataFrame) -> pd.DataFrame:
@@ -181,11 +182,11 @@ def plot_fluxo(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame) -> Tuple[str, Dict
     # Y esquerda (R$ bi): passo de 5 em 5
     ax1.yaxis.set_major_locator(mticker.MultipleLocator(5))
 
-    # Y direita (Ibov): passo 2.500 + limites arredondados
+    # Y direita (Ibov): passo 2.500 + margem de um passo pra não “comer” a curva
     if "Ibovespa" in df_ibov.columns:
         mn, mx = float(df_ibov["Ibovespa"].min()), float(df_ibov["Ibovespa"].max())
-        lo = 2500 * math.floor(mn / 2500)
-        hi = 2500 * math.ceil(mx / 2500)
+        lo = 2500 * math.floor(mn / 2500) - 2500
+        hi = 2500 * math.ceil (mx / 2500) + 2500
         ax2.set_ylim(lo, hi)
     ax2.yaxis.set_major_locator(mticker.MultipleLocator(2500))
     ax2.yaxis.set_major_formatter(mticker.FuncFormatter(thousand_dot))
@@ -206,7 +207,7 @@ def plot_fluxo(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame) -> Tuple[str, Dict
         t.set_color("white")
 
     # Marca d'água menor
-    fig.text(0.5, 0.5, "@alan_richard", fontsize=36, color="gray", alpha=0.06, ha="center", va="center")
+    fig.text(0.5, 0.5, "@alan_richard", fontsize=30, color="gray", alpha=0.06, ha="center", va="center")
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -222,24 +223,24 @@ def plot_fluxo(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame) -> Tuple[str, Dict
 # ----------------- Rota -----------------
 @app.route("/", methods=["GET"])
 def home():
-    # Usuário define apenas a data de início; a data FIM é sempre o último dado disponível da base
+    # Usuário define apenas a data de início; a final é sempre o último dado disponível (considerando delay da B3)
     start_req = request.args.get("start_date")
     start = start_req or date.today().replace(month=1, day=1).strftime("%Y-%m-%d")
 
-    # Busca ampla e determina o último dia de fluxo disponível
+    # Busca ampla
     wide_start = (datetime.fromisoformat(start) - timedelta(days=3*365)).strftime("%Y-%m-%d")
     today = date.today().strftime("%Y-%m-%d")
     df_fluxo_all = fetch_fluxo_b3(wide_start, today)
     df_ibov_all = fetch_ibov_close(wide_start, today)
 
+    # Data final = min(último registro na base, hoje - B3_DELAY_DAYS dias ÚTEIS)
+    last_possible = (pd.Timestamp.today().normalize() - BDay(B3_DELAY_DAYS)).date()
     last_flux_date = df_fluxo_all["data"].max().date()
-    end = last_flux_date.strftime("%Y-%m-%d")
+    end_date = min(last_flux_date, last_possible).strftime("%Y-%m-%d")
 
-    # Recorte do período
-    df_fluxo = df_fluxo_all[(df_fluxo_all["data"] >= pd.to_datetime(start)) & (df_fluxo_all["data"] <= pd.to_datetime(end))].reset_index(drop=True)
-    df_ibov  = df_ibov_all [(df_ibov_all ["data"] >= pd.to_datetime(start)) & (df_ibov_all ["data"] <= pd.to_datetime(end))].reset_index(drop=True)
-
-    # Rebase para acumulado do PERÍODO (corrige “saldo do ano” subestimado)
+    # Recorte + rebase (acumulado do período)
+    df_fluxo = df_fluxo_all[(df_fluxo_all["data"] >= pd.to_datetime(start)) & (df_fluxo_all["data"] <= pd.to_datetime(end_date))].reset_index(drop=True)
+    df_ibov  = df_ibov_all [(df_ibov_all ["data"] >= pd.to_datetime(start)) & (df_ibov_all ["data"] <= pd.to_datetime(end_date))].reset_index(drop=True)
     if not df_fluxo.empty:
         df_fluxo = rebase_period(df_fluxo)
 
@@ -258,7 +259,7 @@ def home():
         resumo=resumo_cards,
         last_date=last_date,
         start_date=start,
-        end_date=end,
+        end_date=end_date,
         categorias=CATEGORIAS,
         movimentos_dia=mov_dia,
         movimentos_mes=mov_mes
