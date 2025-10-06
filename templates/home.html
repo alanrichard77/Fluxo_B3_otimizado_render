@@ -13,19 +13,10 @@
 <body class="bg-[#0f172a] text-white">
 <header class="bg-gradient-to-r from-sky-900 to-indigo-900 p-6 text-center shadow-lg">
   <h1 class="text-3xl font-bold drop-shadow-xl">Fluxo de Investidores B3</h1>
-  <p class="text-sm mt-1 text-slate-300">Acompanhe o movimento de capital no mercado, dados mais recentes</p>
+  <p class="text-sm mt-1 text-slate-300">Dados YTD até o último dia de fluxo divulgado</p>
 </header>
 
 <main class="max-w-7xl mx-auto px-4 py-8 space-y-8">
-
-  <!-- Filtro: só data inicial; a final é sempre o último dado (considerando delay B3) -->
-  <form method="GET" class="flex flex-col md:flex-row items-center gap-3 justify-center">
-    <div class="flex items-center gap-2">
-      <label for="start_date" class="text-sm text-slate-300">Início</label>
-      <input id="start_date" name="start_date" type="date" value="{{ start_date }}" class="bg-[#0b1220] border border-slate-700 rounded-lg px-3 py-2 text-sm" />
-    </div>
-    <button type="submit" class="bg-blue-700 hover:bg-blue-800 text-white font-semibold py-2 px-5 rounded-xl shadow-md transition">Atualizar Gráfico</button>
-  </form>
 
   <!-- Cards de resumo com animação -->
   {% if resumo %}
@@ -48,7 +39,7 @@
   <!-- Gráfico -->
   {% if imagem %}
   <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
-    <img src="data:image/png;base64,{{ imagem }}" alt="Gráfico de Fluxo de Investidores" class="w-full rounded">
+    <img src="data:image/png;base64,{{ imagem }}" alt="Gráfico de Fluxo de Investidores (YTD)" class="w-full rounded">
   </div>
   {% endif %}
 
