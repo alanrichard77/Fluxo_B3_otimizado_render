@@ -1,23 +1,15 @@
-import os
-import io
-import json
-import math
-import base64
-import logging
+import os, io, json, math, base64, logging
 from datetime import datetime, timedelta, date
-from typing import Dict, Tuple
-
-import pandas as pd
-import numpy as np
+from typing import Dict
+import pandas as pd, numpy as np
 from pandas.tseries.offsets import BDay
-from flask import Flask, render_template, request
+from flask import Flask, render_template
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.dates as mdates
 
-# --- Flask com caminhos explícitos ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
     __name__,
@@ -25,17 +17,15 @@ app = Flask(
     static_folder=os.path.join(BASE_DIR, "static"),
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("fluxo-b3")
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Delay padrão de divulgação da B3 (pode ajustar via variável de ambiente)
+# Ajuste de delay de divulgação da B3 (em DIAS ÚTEIS)
 B3_DELAY_DAYS = int(os.getenv("B3_DELAY_DAYS", "2"))
 
 CATEGORIAS = ["Estrangeiro", "Institucional", "Pessoa Física", "Inst. Financeira", "Outros"]
@@ -58,12 +48,11 @@ def _cache_set(key: str, data):
     with open(_cache_path(key), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
-# --------------- Coleta de dados (fallback offline) ---------------
+# --------------- Coleta de dados (troque pelo seu coletor real) ---------------
 def fetch_fluxo_b3(start: str, end: str) -> pd.DataFrame:
     """
-    Em produção, troque por coleta real da B3/Dados de Mercado.
-    Fallback offline: gera série acumulada coerente por categoria em R$ bi.
-    (Sem suavização para não distorcer saldos.)
+    PROD: substituir por coleta real (B3/Dados de Mercado/StatusInvest/Fundamentus etc.).
+    Aqui é um fallback offline (série sintética acumulada por categoria em R$ bi).
     """
     key = f"fluxo_{start}_{end}"
     cached = _cache_get(key)
@@ -108,27 +97,19 @@ def fetch_ibov_close(start: str, end: str) -> pd.DataFrame:
     _cache_set(key, df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
     return df
 
-# ----------------- Helpers de formatação -----------------
-def fmt_bi(x: float) -> str:
-    s = f"{x:,.1f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    sinal = "+" if x >= 0 else "–"
-    return f"{sinal} R$ {s.replace('-', '')} bi"
-
+# ----------------- Helpers -----------------
 def thousand_dot(x, pos=None):
     try:
-        s = f"{int(x):,}".replace(",", ".")
+        return f"{int(x):,}".replace(",", ".")
     except Exception:
-        s = str(x)
-    return s
+        return str(x)
 
-# ----------------- Regras de negócio -----------------
 def rebase_period(df: pd.DataFrame) -> pd.DataFrame:
-    """Zera as séries no 1º dia do filtro para mostrar APENAS o acumulado do período (corrige YTD/2025)."""
+    """Zera as séries no 1º dia do período para exibir apenas o acumulado (YTD)."""
     df = df.copy()
     first = df.iloc[0][CATEGORIAS]
     for c in CATEGORIAS:
-        if c in df.columns:
-            df[c] = df[c] - float(first[c])
+        df[c] = df[c] - float(first[c])
     return df
 
 def last_day_movements(df: pd.DataFrame) -> Dict[str, float]:
@@ -139,7 +120,7 @@ def last_day_movements(df: pd.DataFrame) -> Dict[str, float]:
     return {c: float(last[c] - prev[c]) for c in CATEGORIAS}
 
 def last_month_movements(df_full: pd.DataFrame) -> Dict[str, float]:
-    """Consolidado do mês ANTERIOR, com base na série completa (não no filtro)."""
+    """Consolidado do mês ANTERIOR usando a série completa (precisamos disso se o mês anterior é Dez do ano anterior)."""
     if df_full.empty:
         return {c: 0.0 for c in CATEGORIAS}
     last_date = df_full["data"].dt.date.max()
@@ -152,25 +133,20 @@ def last_month_movements(df_full: pd.DataFrame) -> Dict[str, float]:
     return {c: float(deltas[c]) for c in CATEGORIAS}
 
 # ----------------- Plot -----------------
-def plot_fluxo(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame) -> Tuple[str, Dict[str, float], str]:
+def plot_fluxo(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame):
     fig, ax1 = plt.subplots(figsize=(13, 6.5), dpi=150)
     fig.patch.set_facecolor("#0b1220")
     ax1.set_facecolor("#0b1220")
     ax2 = ax1.twinx()
 
-    # Séries de fluxo
+    # Fluxo por categoria
     for col in CATEGORIAS:
-        if col in df_fluxo.columns:
-            ax1.plot(df_fluxo["data"], df_fluxo[col], label=col, linewidth=2)
+        ax1.plot(df_fluxo["data"], df_fluxo[col], label=col, linewidth=2)
 
-    # Ibovespa: branco e pontilhado
-    if "Ibovespa" in df_ibov.columns:
-        ax2.plot(
-            df_ibov["data"], df_ibov["Ibovespa"],
-            linestyle=":", linewidth=2.2, color="white", label="Ibovespa (pontilhado)"
-        )
+    # Ibovespa (pontilhado branco)
+    ax2.plot(df_ibov["data"], df_ibov["Ibovespa"], linestyle=":", linewidth=2.2, color="white", label="Ibovespa (pontilhado)")
 
-    # Eixo X legível: semanal (<= 6 meses) ou mensal (> 6 meses)
+    # X: semanal se <= 6 meses; caso contrário, mensal
     days = (df_fluxo["data"].max() - df_fluxo["data"].min()).days
     if days <= 185:
         ax1.xaxis.set_major_locator(mdates.DayLocator(interval=7))
@@ -179,19 +155,18 @@ def plot_fluxo(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame) -> Tuple[str, Dict
         ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
         ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b/%y"))
 
-    # Y esquerda (R$ bi): passo de 5 em 5
+    # Y esquerda: R$ bi, passo 5
     ax1.yaxis.set_major_locator(mticker.MultipleLocator(5))
 
-    # Y direita (Ibov): passo 2.500 + margem de um passo pra não “comer” a curva
-    if "Ibovespa" in df_ibov.columns:
-        mn, mx = float(df_ibov["Ibovespa"].min()), float(df_ibov["Ibovespa"].max())
-        lo = 2500 * math.floor(mn / 2500) - 2500
-        hi = 2500 * math.ceil (mx / 2500) + 2500
-        ax2.set_ylim(lo, hi)
+    # Y direita: Ibov, passo 2.500 + margem extra 1 passo
+    mn, mx = float(df_ibov["Ibovespa"].min()), float(df_ibov["Ibovespa"].max())
+    lo = 2500 * math.floor(mn / 2500) - 2500
+    hi = 2500 * math.ceil (mx / 2500) + 2500
+    ax2.set_ylim(lo, hi)
     ax2.yaxis.set_major_locator(mticker.MultipleLocator(2500))
     ax2.yaxis.set_major_formatter(mticker.FuncFormatter(thousand_dot))
 
-    # Visual: sem grades (fundo liso) e spines discretos
+    # Visual limpo
     for sp in ["top", "right", "bottom", "left"]:
         ax1.spines[sp].set_color("#233148")
         ax2.spines[sp].set_color("#233148")
@@ -215,51 +190,51 @@ def plot_fluxo(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame) -> Tuple[str, Dict
     buf.seek(0)
     encoded = base64.b64encode(buf.read()).decode("utf-8")
     plt.close(fig)
-
-    resumo = {c: float(df_fluxo[c].dropna().iloc[-1]) for c in CATEGORIAS}
-    last_date = df_fluxo["data"].dropna().iloc[-1].strftime("%d/%m/%Y")
-    return encoded, resumo, last_date
+    return encoded
 
 # ----------------- Rota -----------------
 @app.route("/", methods=["GET"])
 def home():
-    # Usuário define apenas a data de início; a final é sempre o último dado disponível (considerando delay da B3)
-    start_req = request.args.get("start_date")
-    start = start_req or date.today().replace(month=1, day=1).strftime("%Y-%m-%d")
-
-    # Busca ampla
-    wide_start = (datetime.fromisoformat(start) - timedelta(days=3*365)).strftime("%Y-%m-%d")
-    today = date.today().strftime("%Y-%m-%d")
-    df_fluxo_all = fetch_fluxo_b3(wide_start, today)
-    df_ibov_all = fetch_ibov_close(wide_start, today)
-
-    # Data final = min(último registro na base, hoje - B3_DELAY_DAYS dias ÚTEIS)
+    # 1) Último dia “divulgável” considerando delay em dias ÚTEIS
     last_possible = (pd.Timestamp.today().normalize() - BDay(B3_DELAY_DAYS)).date()
-    last_flux_date = df_fluxo_all["data"].max().date()
-    end_date = min(last_flux_date, last_possible).strftime("%Y-%m-%d")
 
-    # Recorte + rebase (acumulado do período)
-    df_fluxo = df_fluxo_all[(df_fluxo_all["data"] >= pd.to_datetime(start)) & (df_fluxo_all["data"] <= pd.to_datetime(end_date))].reset_index(drop=True)
-    df_ibov  = df_ibov_all [(df_ibov_all ["data"] >= pd.to_datetime(start)) & (df_ibov_all ["data"] <= pd.to_datetime(end_date))].reset_index(drop=True)
+    # 2) Carrega dados amplos desde 1º jan do ano anterior
+    start_fetch = date(last_possible.year - 1, 1, 1)
+    today = date.today().strftime("%Y-%m-%d")
+    df_fluxo_all = fetch_fluxo_b3(start_fetch.strftime("%Y-%m-%d"), today)
+    df_ibov_all  = fetch_ibov_close(start_fetch.strftime("%Y-%m-%d"), today)
+
+    # 3) Data final = min(último registro de fluxo, last_possible)
+    last_flux_date = df_fluxo_all["data"].max().date()
+    end_date = min(last_flux_date, last_possible)
+
+    # 4) Período YTD do ano do end_date
+    start_period = date(end_date.year, 1, 1)
+
+    # 5) Recorte + rebase (acumulado do período)
+    df_fluxo = df_fluxo_all[(df_fluxo_all["data"].dt.date >= start_period) & (df_fluxo_all["data"].dt.date <= end_date)].reset_index(drop=True)
+    df_ibov  = df_ibov_all [(df_ibov_all ["data"].dt.date >= start_period) & (df_ibov_all ["data"].dt.date <= end_date)].reset_index(drop=True)
     if not df_fluxo.empty:
         df_fluxo = rebase_period(df_fluxo)
 
-    imagem, resumo_cards, last_date = (None, {c: 0.0 for c in CATEGORIAS}, "-")
+    imagem = None
+    resumo_cards = {c: 0.0 for c in CATEGORIAS}
     mov_dia = {c: 0.0 for c in CATEGORIAS}
     mov_mes = {c: 0.0 for c in CATEGORIAS}
+    last_date_str = "-"
 
     if not df_fluxo.empty and not df_ibov.empty:
-        imagem, resumo_cards, last_date = plot_fluxo(df_fluxo, df_ibov)
+        imagem = plot_fluxo(df_fluxo, df_ibov)
+        resumo_cards = {c: float(df_fluxo[c].dropna().iloc[-1]) for c in CATEGORIAS}
         mov_dia = last_day_movements(df_fluxo)
         mov_mes = last_month_movements(df_fluxo_all)
+        last_date_str = end_date.strftime("%d/%m/%Y")
 
     return render_template(
         "home.html",
         imagem=imagem,
         resumo=resumo_cards,
-        last_date=last_date,
-        start_date=start,
-        end_date=end_date,
+        last_date=last_date_str,
         categorias=CATEGORIAS,
         movimentos_dia=mov_dia,
         movimentos_mes=mov_mes
