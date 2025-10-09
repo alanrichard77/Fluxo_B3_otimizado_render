@@ -36,14 +36,14 @@ DATA_DIR  = os.path.join(BASE_DIR, "data")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-B3_DELAY_DAYS = int(os.getenv("B3_DELAY_DAYS", "2"))   # atraso de divulgação (dias úteis)
-TZ             = os.getenv("TZ", "America/Sao_Paulo")
-FLUXO_CSV_URL  = os.getenv("FLUXO_CSV_URL", "").strip() # fallback opcional
+B3_DELAY_DAYS = int(os.getenv("B3_DELAY_DAYS", "2"))
+TZ            = os.getenv("TZ", "America/Sao_Paulo")
+FLUXO_CSV_URL = os.getenv("FLUXO_CSV_URL", "").strip()
 
 CATEGORIAS = ["Estrangeiro", "Institucional", "Pessoa Física", "Inst. Financeira", "Outros"]
 
 # =============================================================================
-# CACHE DISCO
+# CACHE
 # =============================================================================
 def _cache_path(key: str) -> str:
     safe = key.replace("/", "_").replace(":", "_")
@@ -60,6 +60,9 @@ def cache_get(key: str):
     return None
 
 def cache_set(key: str, data):
+    # Garante que as chaves sejam strings (evita erro com tuplas)
+    if isinstance(data, dict):
+        data = {str(k): v for k, v in data.items()}
     with open(_cache_path(key), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
@@ -75,12 +78,11 @@ def cache_clear(prefix: Optional[str] = None):
             pass
 
 # =============================================================================
-# FONTE — Dados de Mercado (scraping)
+# FONTE — Dados de Mercado
 # =============================================================================
 DDM_URL = "https://www.dadosdemercado.com.br/fluxo"
 
 def _normalize_fluxo_df(df: pd.DataFrame) -> pd.DataFrame:
-    # Mapear nomes de colunas (variam na página)
     rename_map = {}
     for c in df.columns:
         cl = str(c).strip().lower()
@@ -104,16 +106,13 @@ def _normalize_fluxo_df(df: pd.DataFrame) -> pd.DataFrame:
     if "data" not in df.columns or df.empty:
         return pd.DataFrame(columns=["data"] + CATEGORIAS)
 
-    # Converte data (geralmente DD/MM/YYYY)
     df["data"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
 
-    # Números: a página já usa "." como milhar e "," decimal; read_html com decimal="," e thousands="."
-    # mas garantimos numeric:
     for c in CATEGORIAS:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Heurística de escala (muitas vezes vem em milhões); se mediana |x|>20, assumimos milhões e dividimos por 1000 → bilhões
+    # Heurística de escala (se vier em milhões)
     for c in CATEGORIAS:
         if c in df.columns and df[c].notna().any():
             med = df[c].abs().median()
@@ -124,15 +123,9 @@ def _normalize_fluxo_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def fetch_fluxo_ddm() -> Optional[pd.DataFrame]:
-    """
-    Tenta capturar a tabela principal do Dados de Mercado (/fluxo).
-    Retorna DIÁRIO por player (em R$ bilhões).
-    """
     try:
         logger.info("Coletando fluxo em Dados de Mercado…")
         html = requests.get(DDM_URL, timeout=25).text
-
-        # 1) Primeiro tenta via read_html (mais robusto)
         tables = pd.read_html(html, thousands=".", decimal=",")
         candidates = [t for t in tables if any(str(c).strip().lower() == "data" for c in t.columns)]
         df = None
@@ -140,23 +133,19 @@ def fetch_fluxo_ddm() -> Optional[pd.DataFrame]:
             candidates.sort(key=lambda d: d.shape[0], reverse=True)
             df = candidates[0]
         else:
-            # 2) Fallback: primeira tabela do HTML
             soup = BeautifulSoup(html, "html.parser")
             table = soup.find("table")
             if table:
                 df = pd.read_html(str(table), thousands=".", decimal=",")[0]
-
         if df is None or df.empty:
             return None
-
         return _normalize_fluxo_df(df)
-
     except Exception as e:
         logger.warning(f"Falha ao coletar Dados de Mercado: {e}")
         return None
 
 # =============================================================================
-# FONTE — CSV externo opcional (caso queira usar a sua planilha)
+# FONTE — CSV externo (opcional)
 # =============================================================================
 def fetch_fluxo_csv() -> Optional[pd.DataFrame]:
     if not FLUXO_CSV_URL:
@@ -184,30 +173,50 @@ def fetch_fluxo_csv() -> Optional[pd.DataFrame]:
         return None
 
 # =============================================================================
-# Fallback sintético (apenas para não quebrar em dev)
+# Fallback sintético
 # =============================================================================
 def fetch_fluxo_synthetic(start: date, end: date) -> pd.DataFrame:
     idx = pd.date_range(start, end, freq="D")
     np.random.seed(42)
     base = pd.DataFrame({"data": idx})
-    base["Estrangeiro"] = np.random.normal(0.06, 0.28, len(idx))
-    base["Institucional"] = np.random.normal(-0.03, 0.16, len(idx))
-    base["Pessoa Física"] = np.random.normal(0.01, 0.05, len(idx))
-    base["Inst. Financeira"] = np.random.normal(0.006, 0.04, len(idx))
-    base["Outros"] = np.random.normal(0.00, 0.03, len(idx))
+    base["Estrangeiro"]     = np.random.normal(0.06, 0.28, len(idx))
+    base["Institucional"]   = np.random.normal(-0.03, 0.16, len(idx))
+    base["Pessoa Física"]   = np.random.normal(0.01, 0.05, len(idx))
+    base["Inst. Financeira"]= np.random.normal(0.006, 0.04, len(idx))
+    base["Outros"]          = np.random.normal(0.00, 0.03, len(idx))
     return base
 
 # =============================================================================
-# IBOVESPA: yfinance (principal) + Yahoo Chart API (fallback)
+# IBOVESPA – yfinance + Yahoo Chart API (fallback)
 # =============================================================================
+def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ["_".join([str(x) for x in t if x is not None]).strip() for t in df.columns.to_list()]
+    else:
+        df.columns = [str(c) for c in df.columns]
+    return df
+
 def fetch_ibov_history_yfinance(start: date, end: date) -> Optional[pd.DataFrame]:
     try:
         import yfinance as yf
-        data = yf.download("^BVSP", start=start, end=end + timedelta(days=1), progress=False, auto_adjust=False, threads=False)
+        data = yf.download("^BVSP", start=start, end=end + timedelta(days=1),
+                           progress=False, auto_adjust=False, threads=False)
         if data is None or data.empty:
             return None
-        df = data.reset_index().rename(columns={"Date": "data", "Close": "Ibovespa"})[["data", "Ibovespa"]]
+        data = _flatten_columns(data)
+        # Colunas comuns: Open, High, Low, Close, Adj Close, Volume
+        close_col = None
+        for c in data.columns:
+            if c.lower().endswith("close"):
+                if c.lower() == "close":
+                    close_col = c
+                    break
+                close_col = c  # guarda a melhor opção
+        if close_col is None:
+            return None
+        df = data.reset_index().rename(columns={"Date": "data", close_col: "Ibovespa"})[["data", "Ibovespa"]]
         df["data"] = pd.to_datetime(df["data"])
+        df["Ibovespa"] = pd.to_numeric(df["Ibovespa"], errors="coerce")
         df = df.dropna().sort_values("data").reset_index(drop=True)
         return df
     except Exception as e:
@@ -232,17 +241,23 @@ def fetch_ibov_history_yahoo_chart(years: int = 2) -> Optional[pd.DataFrame]:
         return None
 
 # =============================================================================
-# PIPELINE DE DADOS (com cache)
+# PIPELINE (com cache)
 # =============================================================================
 def get_last_possible_date() -> date:
     return (pd.Timestamp.today().normalize() - BDay(B3_DELAY_DAYS)).date()
 
+def _df_to_cache_payload(df: pd.DataFrame) -> dict:
+    # data -> string ISO/Date; chaves str
+    payload = df.copy()
+    if "data" in payload.columns:
+        payload["data"] = pd.to_datetime(payload["data"]).dt.strftime("%Y-%m-%d")
+    dct = payload.to_dict(orient="list")
+    return {str(k): v for k, v in dct.items()}
+
 def load_fluxo_raw() -> pd.DataFrame:
     cached = cache_get("fluxo_raw")
     if cached is not None:
-        df = pd.DataFrame(cached)
-        df["data"] = pd.to_datetime(df["data"])
-        return df
+        df = pd.DataFrame(cached); df["data"] = pd.to_datetime(df["data"]); return df
 
     df = fetch_fluxo_ddm()
     if df is None:
@@ -251,7 +266,7 @@ def load_fluxo_raw() -> pd.DataFrame:
         start = date.today().replace(month=1, day=1) - timedelta(days=180)
         df = fetch_fluxo_synthetic(start, date.today())
 
-    cache_set("fluxo_raw", df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
+    cache_set("fluxo_raw", _df_to_cache_payload(df))
     return df
 
 def load_ibov_history(start: date, end: date) -> pd.DataFrame:
@@ -267,31 +282,25 @@ def load_ibov_history(start: date, end: date) -> pd.DataFrame:
             df = df[(df["data"].dt.date >= start) & (df["data"].dt.date <= end)].copy()
 
     if df is None:
-        # fallback sintético
         idx = pd.date_range(start, end, freq="D")
         serie = 120_000 + np.cumsum(np.random.normal(0, 120, len(idx)))
         df = pd.DataFrame({"data": idx, "Ibovespa": serie})
 
-    cache_set(key, df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
+    cache_set(key, _df_to_cache_payload(df))
     return df
 
 # =============================================================================
 # TRANSFORMAÇÕES
 # =============================================================================
 def compute_ytd(df_daily: pd.DataFrame, end_date: date) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float], Dict[str, float]]:
-    """Diário → Acumulado YTD + resumos (cards, dia, mês anterior)."""
     start_ytd = date(end_date.year, 1, 1)
     dfd = df_daily[(df_daily["data"].dt.date >= start_ytd) & (df_daily["data"].dt.date <= end_date)].copy()
     dfd = dfd.sort_values("data").reset_index(drop=True)
-
-    # acumulado YTD (cumsum)
     for c in CATEGORIAS:
         if c in dfd.columns:
             dfd[c] = dfd[c].fillna(0).cumsum()
-
     resumo_cards = {c: float(dfd[c].dropna().iloc[-1]) if c in dfd.columns and len(dfd) else 0.0 for c in CATEGORIAS}
 
-    # movimentos do dia (delta diário) usando o diário original
     dl = df_daily[df_daily["data"].dt.date <= end_date].copy().sort_values("data")
     mov_dia = {c: 0.0 for c in CATEGORIAS}
     if len(dl) >= 2:
@@ -299,7 +308,6 @@ def compute_ytd(df_daily: pd.DataFrame, end_date: date) -> Tuple[pd.DataFrame, D
         prev = dl.iloc[-2][CATEGORIAS]
         mov_dia = {c: float(last[c] - prev[c]) for c in CATEGORIAS}
 
-    # mês anterior
     mov_mes = {c: 0.0 for c in CATEGORIAS}
     if not dl.empty:
         last_date = dl["data"].dt.date.max()
@@ -313,7 +321,7 @@ def compute_ytd(df_daily: pd.DataFrame, end_date: date) -> Tuple[pd.DataFrame, D
     return dfd, resumo_cards, mov_dia, mov_mes
 
 # =============================================================================
-# FORMATAÇÃO / PLOTS
+# PLOTS
 # =============================================================================
 def thousand_dot(x, pos=None):
     try:
@@ -344,16 +352,14 @@ def plot_linhas_ytd(df_ytd: pd.DataFrame, df_ibov: pd.DataFrame) -> str:
     days = (df_ytd["data"].max() - df_ytd["data"].min()).days
     if days <= 185:
         ax1.xaxis.set_major_locator(mdates.DayLocator(interval=7))
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b/%y"))
+        ax1.xaxis.set_majorFormatter(mdates.DateFormatter("%b/%y"))
     else:
         ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b/%y"))
+        ax1.xaxis.set_majorFormatter(mdates.DateFormatter("%b/%y"))
 
-    # Y esquerda
     ax1.yaxis.set_major_locator(mticker.MultipleLocator(5))
     ax1.set_ylabel("Acumulado (R$ bilhões)", color="white", labelpad=8)
 
-    # Y direita (Ibov) - passo 2.500
     if not df_ibov.empty:
         mn, mx = float(df_ibov["Ibovespa"].min()), float(df_ibov["Ibovespa"].max())
         lo = 2500 * math.floor(mn / 2500) - 2500
@@ -385,7 +391,6 @@ def plot_linhas_ytd(df_ytd: pd.DataFrame, df_ibov: pd.DataFrame) -> str:
     return encoded
 
 def plot_estrangeiro_30dias(df_daily: pd.DataFrame, end_date: date) -> str:
-    """Barras VERTICAIS últimos 30 dias + MM(28) e rótulo de valor nas barras."""
     d = df_daily[df_daily["data"].dt.date <= end_date].copy().sort_values("data")
     d["estrangeiro"] = d["Estrangeiro"].fillna(0.0)
     d["mm28"] = d["estrangeiro"].rolling(28, min_periods=1).mean()
@@ -396,11 +401,8 @@ def plot_estrangeiro_30dias(df_daily: pd.DataFrame, end_date: date) -> str:
 
     colors = ["#22c55e" if v >= 0 else "#ef4444" for v in d["estrangeiro"]]
     ax.bar(d["data"], d["estrangeiro"], color=colors, width=0.85, zorder=2)
-
-    # média móvel (usa a janela exibida para coerência visual)
     ax.plot(d["data"], d["mm28"], color="#f59e0b", linewidth=2.0, label="Média 28", zorder=3)
 
-    # rótulos nas barras
     for x, y in zip(d["data"], d["estrangeiro"]):
         va = "bottom" if y >= 0 else "top"
         off = 0.03 if y >= 0 else -0.03
@@ -435,22 +437,17 @@ def refresh():
 def home():
     last_possible = get_last_possible_date()
 
-    # FLUXO diário
     df_daily = load_fluxo_raw()
 
-    # IBOV
-    start_for_ibov = date(last_possible.year, 1, 1) - timedelta(days=10)  # pequena margem
+    start_for_ibov = date(last_possible.year, 1, 1) - timedelta(days=10)
     df_ibov_hist = load_ibov_history(start_for_ibov, last_possible)
     df_ibov = df_ibov_hist[df_ibov_hist["data"].dt.date <= last_possible].copy().sort_values("data").reset_index(drop=True)
 
-    # Transformações → YTD e resumos
     df_ytd, resumo_cards, mov_dia, mov_mes = compute_ytd(df_daily, last_possible)
 
-    # Gráficos
     img_linhas = plot_linhas_ytd(df_ytd, df_ibov)
     img_barras = plot_estrangeiro_30dias(df_daily, last_possible)
 
-    # Texto do último dia
     ld = pd.Series(mov_dia)
     comprador = ld.idxmax(); vcomp = ld.max()
     vendedor  = ld.idxmin(); vvend = ld.min()
@@ -459,7 +456,6 @@ def home():
         f"Maior vendedor: {vendedor} ({'+' if vvend>=0 else '–'} R$ {abs(vvend):.1f} bi)"
     )
 
-    # Ibovespa do dia
     ibov_close = df_ibov["Ibovespa"].iloc[-1] if len(df_ibov) else np.nan
     ibov_prev  = df_ibov["Ibovespa"].iloc[-2] if len(df_ibov) > 1 else ibov_close
     var = (ibov_close - ibov_prev) if pd.notna(ibov_close) and pd.notna(ibov_prev) else 0.0
