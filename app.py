@@ -1,215 +1,509 @@
-import os, io, json, math, base64, logging
+import os, io, json, math, base64, logging, time
 from datetime import datetime, timedelta, date
-from typing import Dict
-import pandas as pd, numpy as np
+from typing import Dict, List, Optional, Tuple
+
+import pandas as pd
+import numpy as np
 from pandas.tseries.offsets import BDay
-from flask import Flask, render_template
+from flask import Flask, render_template, redirect, url_for
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.dates as mdates
 
-# --------------------------- CONFIGURAÇÃO GERAL ---------------------------
+import requests
+from bs4 import BeautifulSoup
+
+# ============================================================================
+# CONFIG
+# ============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
-            static_folder=os.path.join(BASE_DIR, "static"))
-logging.basicConfig(level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+app = Flask(
+    __name__,
+    template_folder=os.path.join(BASE_DIR, "templates"),
+    static_folder=os.path.join(BASE_DIR, "static"),
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 logger = logging.getLogger("fluxo-b3")
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# delay padrão da B3 (dias úteis) → ajuste no Render se quiser
+# Dias ÚTEIS de atraso para a B3 divulgar
 B3_DELAY_DAYS = int(os.getenv("B3_DELAY_DAYS", "2"))
 TZ = os.getenv("TZ", "America/Sao_Paulo")
 
+# CSV externo opcional, como fallback de dados
+FLUXO_CSV_URL = os.getenv("FLUXO_CSV_URL", "").strip()
+
 CATEGORIAS = ["Estrangeiro", "Institucional", "Pessoa Física", "Inst. Financeira", "Outros"]
 
-# --------------------------- CACHE SIMPLES ---------------------------
-def _cache_path(key: str) -> str: return os.path.join(CACHE_DIR, f"{key}.json")
-def _cache_get(key: str):
+
+# ============================================================================
+# CACHE BÁSICO EM DISCO
+# ============================================================================
+def _cache_path(key: str) -> str:
+    safe = key.replace("/", "_").replace(":", "_")
+    return os.path.join(CACHE_DIR, f"{safe}.json")
+
+def cache_get(key: str):
     fp = _cache_path(key)
     if os.path.exists(fp):
         try:
-            with open(fp, "r", encoding="utf-8") as f: return json.load(f)
-        except Exception: return None
+            with open(fp, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
     return None
-def _cache_set(key: str, data):
-    with open(_cache_path(key), "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False)
 
-# --------------------------- COLETA DE DADOS ---------------------------
-def fetch_fluxo_b3(start: str, end: str) -> pd.DataFrame:
-    """
-    PROD: substitua por coleta real (B3 / Dados de Mercado / StatusInvest / Fundamentus).
-    Aqui é um fallback sintético apenas para visualização.
-    """
-    key = f"fluxo_{start}_{end}"
-    cached = _cache_get(key)
-    if cached is not None:
-        df = pd.DataFrame(cached); df["data"] = pd.to_datetime(df["data"]); return df
+def cache_set(key: str, data):
+    with open(_cache_path(key), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
 
-    d0, d1 = pd.to_datetime(start), pd.to_datetime(end)
-    idx = pd.date_range(d0, d1, freq="D", tz=TZ)
+def cache_clear(prefix: Optional[str] = None):
+    if not os.path.isdir(CACHE_DIR):
+        return
+    for fname in os.listdir(CACHE_DIR):
+        if prefix and not fname.startswith(prefix):
+            continue
+        try:
+            os.remove(os.path.join(CACHE_DIR, fname))
+        except Exception:
+            pass
+
+
+# ============================================================================
+# FONTE 1 — Dados de Mercado (scraping)
+#   - Página: https://www.dadosdemercado.com.br/fluxo
+#   - Captura a tabela principal (data e saldos diários por player)
+#   - Campos esperados (variam em maiúsc./acentos): Data, Estrangeiro, Institucional,
+#     Pessoa Física, Inst. Financeira, Outros
+#   - Valores em bilhões (R$)
+# ============================================================================
+DDM_URL = "https://www.dadosdemercado.com.br/fluxo"
+
+def fetch_fluxo_ddm() -> Optional[pd.DataFrame]:
+    try:
+        logger.info("Coletando fluxo em Dados de Mercado...")
+        html = requests.get(DDM_URL, timeout=20).text
+        # Primeiro tenta via read_html (mais robusto)
+        tables = pd.read_html(html, thousands=".", decimal=",")
+        # Escolhe a maior tabela com coluna "Data"
+        candidates = [t for t in tables if any(c.lower() == "data" for c in t.columns)]
+        if not candidates:
+            # Fallback parse manual com BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
+            table = soup.find("table")
+            df = pd.read_html(str(table), thousands=".", decimal=",")[0]
+        else:
+            # geralmente a primeira maior é a correta
+            candidates.sort(key=lambda d: d.shape[0], reverse=True)
+            df = candidates[0]
+
+        # Normaliza colunas
+        rename_map = {}
+        for c in df.columns:
+            cl = str(c).strip().lower()
+            if cl == "data":
+                rename_map[c] = "data"
+            elif "estrange" in cl:
+                rename_map[c] = "Estrangeiro"
+            elif "institucional" in cl and "inst." not in cl:
+                rename_map[c] = "Institucional"
+            elif "pessoa" in cl:
+                rename_map[c] = "Pessoa Física"
+            elif "inst." in cl or "financeir" in cl:
+                rename_map[c] = "Inst. Financeira"
+            elif "outros" in cl:
+                rename_map[c] = "Outros"
+        df = df.rename(columns=rename_map)
+
+        cols_needed = ["data"] + CATEGORIAS
+        df = df[[c for c in cols_needed if c in df.columns]].copy()
+        if "data" not in df.columns or len(df) == 0:
+            return None
+
+        # Converte datas e números (já veio com decimal=, thousands=.)
+        df["data"] = pd.to_datetime(df["data"], dayfirst=True)
+
+        # Se os números estiverem em milhões, converte p/ bilhões (heurística)
+        for col in CATEGORIAS:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Remove linhas totalmente vazias
+        df = df.dropna(subset=["data"]).reset_index(drop=True)
+
+        # Ordena por data ascendente
+        df = df.sort_values("data").reset_index(drop=True)
+
+        # Alguns sites trazem dados diários líquidos (não acumulados).
+        # Manteremos como "diário" aqui; acumulado aplicamos depois (rebase YTD).
+        return df
+    except Exception as e:
+        logger.warning(f"Falha ao coletar Dados de Mercado: {e}")
+        return None
+
+
+# ============================================================================
+# FONTE 2 — CSV externo (se informado em FLUXO_CSV_URL)
+#   Espera colunas: date, estrangeiro, institucional, pessoa_fisica, inst_financeira, outros
+#   em valores DIÁRIOS (R$ bi). Data em yyyy-mm-dd.
+# ============================================================================
+def fetch_fluxo_csv() -> Optional[pd.DataFrame]:
+    if not FLUXO_CSV_URL:
+        return None
+    try:
+        logger.info(f"Coletando CSV externo: {FLUXO_CSV_URL}")
+        df = pd.read_csv(FLUXO_CSV_URL)
+        rename = {
+            "date": "data",
+            "estrangeiro": "Estrangeiro",
+            "institucional": "Institucional",
+            "pessoa_fisica": "Pessoa Física",
+            "inst_financeira": "Inst. Financeira",
+            "outros": "Outros",
+        }
+        df = df.rename(columns=rename)
+        df["data"] = pd.to_datetime(df["data"])
+        for c in CATEGORIAS:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=["data"]).sort_values("data").reset_index(drop=True)
+        return df
+    except Exception as e:
+        logger.warning(f"Falha ao coletar CSV externo: {e}")
+        return None
+
+
+# ============================================================================
+# FONTE 3 — Fallback sintético (apenas para não quebrar em dev)
+# ============================================================================
+def fetch_fluxo_synthetic(start: date, end: date) -> pd.DataFrame:
+    idx = pd.date_range(start, end, freq="D")
     np.random.seed(42)
-    base = pd.DataFrame({"data": idx.tz_localize(None)})
-    base["Estrangeiro"]      = np.cumsum(np.random.normal(0.06, 0.28, len(idx))) + 5
-    base["Institucional"]    = np.cumsum(np.random.normal(-0.03, 0.16, len(idx))) - 10
-    base["Pessoa Física"]    = np.cumsum(np.random.normal(0.01, 0.05, len(idx))) + 2
-    base["Inst. Financeira"] = np.cumsum(np.random.normal(0.006, 0.04, len(idx))) + 1
-    base["Outros"]           = np.cumsum(np.random.normal(0.00, 0.03, len(idx))) + 0.5
-    _cache_set(key, base.assign(data=base["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
+    base = pd.DataFrame({"data": idx})
+    base["Estrangeiro"]      = np.random.normal(0.06, 0.28, len(idx))
+    base["Institucional"]    = np.random.normal(-0.03, 0.16, len(idx))
+    base["Pessoa Física"]    = np.random.normal(0.01, 0.05, len(idx))
+    base["Inst. Financeira"] = np.random.normal(0.006, 0.04, len(idx))
+    base["Outros"]           = np.random.normal(0.00, 0.03, len(idx))
     return base
 
-def fetch_ibov_close(start: str, end: str) -> pd.DataFrame:
-    key = f"ibov_{start}_{end}"
-    cached = _cache_get(key)
+
+# ============================================================================
+# IBOVESPA — Yahoo Finance (primário) e brapi (fallback)
+# ============================================================================
+def fetch_ibov_history_yahoo(years: int = 2) -> Optional[pd.DataFrame]:
+    try:
+        # RANGE por UNIX time (Yahoo chart API)
+        end = int(time.time())
+        start = end - 60 * 60 * 24 * 365 * years
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?period1={start}&period2={end}&interval=1d"
+        r = requests.get(url, timeout=20)
+        j = r.json()
+        ts = j["chart"]["result"][0]["timestamp"]
+        closes = j["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        df = pd.DataFrame({"data": pd.to_datetime(ts, unit="s"), "Ibovespa": closes})
+        df = df.dropna().sort_values("data").reset_index(drop=True)
+        return df
+    except Exception as e:
+        logger.warning(f"Falha Yahoo: {e}")
+        return None
+
+def fetch_ibov_history_brapi() -> Optional[pd.DataFrame]:
+    try:
+        url = "https://brapi.dev/api/quote/%5EBVSP?range=2y&interval=1d"
+        j = requests.get(url, timeout=20).json()
+        # brapi muitas vezes devolve no campo 'results'[0]['historicalDataPrice']
+        hist = j.get("results", [{}])[0].get("historicalDataPrice", [])
+        if not hist:
+            return None
+        df = pd.DataFrame(hist)
+        df["data"] = pd.to_datetime(df["date"], unit="s")
+        df = df.rename(columns={"close": "Ibovespa"})[["data", "Ibovespa"]]
+        df = df.dropna().sort_values("data").reset_index(drop=True)
+        return df
+    except Exception as e:
+        logger.warning(f"Falha brapi: {e}")
+        return None
+
+
+# ============================================================================
+# PIPELINE DE DADOS (com cache)
+# ============================================================================
+def get_last_possible_date() -> date:
+    return (pd.Timestamp.today().normalize() - BDay(B3_DELAY_DAYS)).date()
+
+def load_fluxo_raw() -> pd.DataFrame:
+    """Dados DIÁRIOS (não acumulados), um por player."""
+    # cache
+    cached = cache_get("fluxo_raw")
     if cached is not None:
-        df = pd.DataFrame(cached); df["data"] = pd.to_datetime(df["data"]); return df
-    d0, d1 = pd.to_datetime(start), pd.to_datetime(end)
-    idx = pd.date_range(d0, d1, freq="D", tz=TZ)
-    serie = 120000 + np.cumsum(np.random.normal(0, 120, len(idx)))
-    df = pd.DataFrame({"data": idx.tz_localize(None), "Ibovespa": serie})
-    _cache_set(key, df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
+        df = pd.DataFrame(cached)
+        df["data"] = pd.to_datetime(df["data"])
+        return df
+
+    # cadeia de fontes
+    df = fetch_fluxo_ddm()
+    if df is None:
+        df = fetch_fluxo_csv()
+    if df is None:
+        # fallback sintético
+        start = date.today().replace(month=1, day=1) - timedelta(days=180)
+        df = fetch_fluxo_synthetic(start, date.today())
+
+    # guarda cache
+    cache_set("fluxo_raw", df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
     return df
 
-# --------------------------- HELPERS ---------------------------
+def load_ibov_history() -> pd.DataFrame:
+    cached = cache_get("ibov_hist")
+    if cached is not None:
+        df = pd.DataFrame(cached)
+        df["data"] = pd.to_datetime(df["data"])
+        return df
+
+    df = fetch_ibov_history_yahoo(2)
+    if df is None:
+        df = fetch_ibov_history_brapi()
+    if df is None:
+        # fallback sintético
+        idx = pd.date_range(date.today() - timedelta(days=365), date.today(), freq="D")
+        serie = 120_000 + np.cumsum(np.random.normal(0, 120, len(idx)))
+        df = pd.DataFrame({"data": idx, "Ibovespa": serie})
+
+    cache_set("ibov_hist", df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
+    return df
+
+def compute_ytd(df_daily: pd.DataFrame, end_date: date) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float]]:
+    """Transforma DIÁRIO em ACUMULADO YTD + resumos."""
+    start_ytd = date(end_date.year, 1, 1)
+
+    # recorte do ano corrente
+    dfd = df_daily[(df_daily["data"].dt.date >= start_ytd) & (df_daily["data"].dt.date <= end_date)].copy()
+
+    # acumula (cumsum) por coluna de player
+    for c in CATEGORIAS:
+        if c in dfd.columns:
+            dfd[c] = dfd[c].fillna(0).cumsum()
+
+    dfd = dfd.sort_values("data").reset_index(drop=True)
+
+    resumo_cards = {c: float(dfd[c].dropna().iloc[-1]) if c in dfd.columns and len(dfd) else 0.0 for c in CATEGORIAS}
+
+    # movimentação do último dia (delta diário — usa df_daily)
+    dl = df_daily[(df_daily["data"].dt.date <= end_date)].copy().sort_values("data")
+    mov_dia = {c: 0.0 for c in CATEGORIAS}
+    if len(dl) >= 2:
+        last = dl.iloc[-1][CATEGORIAS]
+        prev = dl.iloc[-2][CATEGORIAS]
+        mov_dia = {c: float(last[c] - prev[c]) for c in CATEGORIAS}
+
+    # mês anterior (a partir do diário)
+    mov_mes = {c: 0.0 for c in CATEGORIAS}
+    if len(dl) > 0:
+        last_date = dl["data"].dt.date.max()
+        ref = (last_date.replace(day=1) - timedelta(days=1))
+        month_start = ref.replace(day=1)
+        m = dl[(dl["data"].dt.date >= month_start) & (dl["data"].dt.date <= ref)]
+        if len(m) >= 2:
+            delta = m.iloc[-1][CATEGORIAS] - m.iloc[0][CATEGORIAS]
+            mov_mes = {c: float(delta[c]) for c in CATEGORIAS}
+
+    return dfd, resumo_cards, mov_dia, mov_mes
+
+
+# ============================================================================
+# FORMATAÇÃO
+# ============================================================================
 def thousand_dot(x, pos=None):
-    try: return f"{int(x):,}".replace(",", ".")
-    except Exception: return str(x)
+    try:
+        return f"{int(x):,}".replace(",", ".")
+    except Exception:
+        return str(x)
 
-def rebase_period(df: pd.DataFrame) -> pd.DataFrame:
-    """Zera as séries no 1º dia do período para exibir acumulado YTD."""
-    df = df.copy(); first = df.iloc[0][CATEGORIAS]
-    for c in CATEGORIAS: df[c] = df[c] - float(first[c])
-    return df
 
-def last_day_movements(df: pd.DataFrame) -> Dict[str, float]:
-    if len(df) < 2: return {c: 0.0 for c in CATEGORIAS}
-    last, prev = df.iloc[-1][CATEGORIAS], df.iloc[-2][CATEGORIAS]
-    return {c: float(last[c] - prev[c]) for c in CATEGORIAS}
-
-def last_month_movements(df_full: pd.DataFrame) -> Dict[str, float]:
-    if df_full.empty: return {c: 0.0 for c in CATEGORIAS}
-    last_date = df_full["data"].dt.date.max()
-    ref = (last_date.replace(day=1) - timedelta(days=1))
-    month_start = ref.replace(day=1)
-    m = df_full[(df_full["data"].dt.date >= month_start) & (df_full["data"].dt.date <= ref)]
-    if m.empty: return {c: 0.0 for c in CATEGORIAS}
-    deltas = m.iloc[-1][CATEGORIAS] - m.iloc[0][CATEGORIAS]
-    return {c: float(deltas[c]) for c in CATEGORIAS}
-
-# --------------------------- GRÁFICOS ---------------------------
-def plot_ytd(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame):
-    fig, ax1 = plt.subplots(figsize=(13, 6.5), dpi=150)
-    fig.patch.set_facecolor("#0b1220"); ax1.set_facecolor("#0b1220")
+# ============================================================================
+# PLOTS
+# ============================================================================
+def plot_linhas_ytd(df_ytd: pd.DataFrame, df_ibov: pd.DataFrame) -> str:
+    fig, ax1 = plt.subplots(figsize=(14, 6.7), dpi=150)
+    fig.patch.set_facecolor("#0b1220")
+    ax1.set_facecolor("#0b1220")
     ax2 = ax1.twinx()
 
+    # séries de fluxo (acumulado YTD)
     for col in CATEGORIAS:
-        ax1.plot(df_fluxo["data"], df_fluxo[col], label=col, linewidth=2)
+        if col in df_ytd.columns:
+            ax1.plot(df_ytd["data"], df_ytd[col], label=col, linewidth=2)
 
+    # ibovespa
     ax2.plot(df_ibov["data"], df_ibov["Ibovespa"], linestyle=":", linewidth=2.2, color="white", label="Ibovespa (pontilhado)")
 
-    days = (df_fluxo["data"].max() - df_fluxo["data"].min()).days
+    # eixo X — semanal até 6m, senão mensal
+    days = (df_ytd["data"].max() - df_ytd["data"].min()).days
     if days <= 185:
         ax1.xaxis.set_major_locator(mdates.DayLocator(interval=7))
-        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b/%y"))
     else:
         ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
         ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b/%y"))
 
+    # Y esquerda: acumulado (R$ bi), passo 5
     ax1.yaxis.set_major_locator(mticker.MultipleLocator(5))
+    ax1.set_ylabel("Acumulado (R$ bilhões)", color="white", labelpad=8)
+
+    # Y direita: Ibovespa (pts), passo 2.500, com margem
     mn, mx = float(df_ibov["Ibovespa"].min()), float(df_ibov["Ibovespa"].max())
     lo = 2500 * math.floor(mn / 2500) - 2500
     hi = 2500 * math.ceil (mx / 2500) + 2500
     ax2.set_ylim(lo, hi)
     ax2.yaxis.set_major_locator(mticker.MultipleLocator(2500))
     ax2.yaxis.set_major_formatter(mticker.FuncFormatter(thousand_dot))
+    ax2.set_ylabel("Ibovespa (pts)", color="white", labelpad=8)
 
-    for sp in ["top","right","bottom","left"]:
-        ax1.spines[sp].set_color("#233148"); ax2.spines[sp].set_color("#233148")
-    ax1.tick_params(axis="x", colors="white"); ax1.tick_params(axis="y", colors="white")
+    # estilo
+    for sp in ["top", "right", "bottom", "left"]:
+        ax1.spines[sp].set_color("#233148")
+        ax2.spines[sp].set_color("#233148")
+    ax1.tick_params(axis="x", colors="white")
+    ax1.tick_params(axis="y", colors="white")
     ax2.tick_params(axis="y", colors="white")
 
-    l1, lb1 = ax1.get_legend_handles_labels(); l2, lb2 = ax2.get_legend_handles_labels()
-    leg = ax1.legend(l1+l2, lb1+lb2, loc="upper left", frameon=False, fontsize=9)
-    for t in leg.get_texts(): t.set_color("white")
+    # legenda
+    l1, lb1 = ax1.get_legend_handles_labels()
+    l2, lb2 = ax2.get_legend_handles_labels()
+    leg = ax1.legend(l1 + l2, lb1 + lb2, loc="upper left", frameon=False, fontsize=9)
+    for t in leg.get_texts():
+        t.set_color("white")
 
-    fig.text(0.5, 0.5, "@alan_richard", fontsize=30, color="gray", alpha=0.06, ha="center", va="center")
+    # marca d'água
+    fig.text(0.5, 0.5, "@alan_richard", fontsize=28, color="gray", alpha=0.06, ha="center", va="center")
+
     plt.tight_layout()
-    buf = io.BytesIO(); plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight"); buf.seek(0)
-    enc = base64.b64encode(buf.read()).decode("utf-8"); plt.close(fig)
-    return enc
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
+    buf.seek(0)
+    encoded = base64.b64encode(buf.read()).decode("utf-8")
+    plt.close(fig)
+    return encoded
 
-def plot_estrangeiro_30d(df_fluxo_ytd: pd.DataFrame):
-    df = df_fluxo_ytd[["data","Estrangeiro"]].copy()
-    df["delta"] = df["Estrangeiro"].diff()
-    df = df.dropna().tail(30)
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=150)
-    fig.patch.set_facecolor("#0b1220"); ax.set_facecolor("#0b1220")
-    colors = ["#16a34a" if v >= 0 else "#ef4444" for v in df["delta"]]
-    ax.barh(df["data"].dt.strftime("%d/%m"), df["delta"], color=colors)
+
+def plot_estrangeiro_30dias(df_daily: pd.DataFrame, end_date: date) -> str:
+    """Barras centradas no zero (últimos 30 dias), com MM(28)."""
+    d = df_daily[df_daily["data"].dt.date <= end_date].copy().sort_values("data")
+    d["estrangeiro"] = d["Estrangeiro"].fillna(0.0)
+    d["mm28"] = d["estrangeiro"].rolling(28).mean()
+    d = d.tail(60)  # pega 60 e depois corta 30 úteis mais recentes
+    d = d.tail(30)
+
+    fig, ax = plt.subplots(figsize=(14, 6.0), dpi=150)
+    fig.patch.set_facecolor("#0b1220")
+    ax.set_facecolor("#0b1220")
+
+    # barras horizontais com cores por sinal
+    colors = ["#22c55e" if v >= 0 else "#ef4444" for v in d["estrangeiro"]]
+    ax.barh(d["data"].dt.strftime("%d/%m"), d["estrangeiro"], color=colors)
     ax.invert_yaxis()
-    ax.xaxis.set_major_locator(mticker.MultipleLocator(0.5))
-    ax.set_xlabel("R$ bi (diário)", color="white")
-    ax.tick_params(axis="x", colors="white"); ax.tick_params(axis="y", colors="white")
-    for sp in ["top","right","bottom","left"]:
-        ax.spines[sp].set_color("#233148")
-    plt.tight_layout()
-    buf = io.BytesIO(); plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight"); buf.seek(0)
-    enc = base64.b64encode(buf.read()).decode("utf-8"); plt.close(fig)
-    return enc
 
-# --------------------------- ROTA PRINCIPAL ---------------------------
+    # média móvel
+    ax2 = ax.twiny()
+    ax2.plot(d["mm28"], d["data"].dt.strftime("%d/%m"), color="#f59e0b", linewidth=2.0)
+
+    # eixo X centralizado no zero
+    max_abs = max(abs(d["estrangeiro"].min()), abs(d["estrangeiro"].max()), 0.5)
+    ax.set_xlim(-max_abs, max_abs)
+    ax.xaxis.set_major_locator(mticker.MultipleLocator(max(0.25, round(max_abs/6, 2))))
+    ax.set_xlabel("R$ bi (diário)", color="white")
+
+    for a in (ax, ax2):
+        a.tick_params(colors="white")
+        for sp in ["top", "right", "bottom", "left"]:
+            try:
+                a.spines[sp].set_color("#233148")
+            except Exception:
+                pass
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
+    buf.seek(0)
+    encoded = base64.b64encode(buf.read()).decode("utf-8")
+    plt.close(fig)
+    return encoded
+
+
+# ============================================================================
+# ROTAS
+# ============================================================================
+@app.route("/refresh")
+def refresh():
+    # limpa caches e redireciona
+    cache_clear()
+    return redirect(url_for("home"))
+
 @app.route("/", methods=["GET"])
 def home():
-    last_possible = (pd.Timestamp.today().normalize() - BDay(B3_DELAY_DAYS)).date()
-    start_fetch = date(last_possible.year - 1, 1, 1).strftime("%Y-%m-%d")
-    today = date.today().strftime("%Y-%m-%d")
-    df_fluxo_all = fetch_fluxo_b3(start_fetch, today)
-    df_ibov_all  = fetch_ibov_close(start_fetch, today)
+    last_possible = get_last_possible_date()
 
-    last_flux_date = df_fluxo_all["data"].max().date()
-    end_date = min(last_flux_date, last_possible)
-    start_ytd = date(end_date.year, 1, 1)
+    # carrega fontes
+    df_daily = load_fluxo_raw()               # DIÁRIO por player
+    df_ibov_hist = load_ibov_history()        # histórico IBOV
 
-    df_fluxo = df_fluxo_all[(df_fluxo_all["data"].dt.date >= start_ytd) & (df_fluxo_all["data"].dt.date <= end_date)].reset_index(drop=True)
-    df_ibov  = df_ibov_all [(df_ibov_all ["data"].dt.date >= start_ytd) & (df_ibov_all ["data"].dt.date <= end_date)].reset_index(drop=True)
-    if not df_fluxo.empty: df_fluxo = rebase_period(df_fluxo)
+    # garante recorte do ibov até last_possible
+    df_ibov = df_ibov_hist[df_ibov_hist["data"].dt.date <= last_possible].copy()
+    if df_ibov.empty:
+        df_ibov = df_ibov_hist.copy()
+    df_ibov = df_ibov.sort_values("data").reset_index(drop=True)
 
-    imagem = imagem_bar = None
-    resumo_cards = {c: 0.0 for c in CATEGORIAS}
-    mov_dia = {c: 0.0 for c in CATEGORIAS}
-    mov_mes = {c: 0.0 for c in CATEGORIAS}
-    last_date_str = "-"
-    diario_texto = "-"
-    ibov_texto = "-"
+    # transforma diário -> acumulado YTD + resumos
+    df_ytd, resumo_cards, mov_dia, mov_mes = compute_ytd(df_daily, last_possible)
 
-    if not df_fluxo.empty and not df_ibov.empty:
-        imagem = plot_ytd(df_fluxo, df_ibov)
-        imagem_bar = plot_estrangeiro_30d(df_fluxo)
-        resumo_cards = {c: float(df_fluxo[c].dropna().iloc[-1]) for c in CATEGORIAS}
-        mov_dia = last_day_movements(df_fluxo)
-        mov_mes = last_month_movements(df_fluxo_all)
-        last_date_str = end_date.strftime("%d/%m/%Y")
+    # gráficos
+    img_linhas = plot_linhas_ytd(df_ytd, df_ibov)
+    img_barras = plot_estrangeiro_30dias(df_daily, last_possible)
 
-        ld = pd.Series(mov_dia)
-        comprador = ld.idxmax(); vcomp = ld.max()
-        vendedor  = ld.idxmin(); vvend = ld.min()
-        diario_texto = f"Maior comprador: {comprador} ({'+' if vcomp>=0 else '–'} R$ {abs(vcomp):.1f} bi) • Maior vendedor: {vendedor} ({'+' if vvend>=0 else '–'} R$ {abs(vvend):.1f} bi)"
-        ibov_close = df_ibov["Ibovespa"].iloc[-1]
-        ibov_prev  = df_ibov["Ibovespa"].iloc[-2] if len(df_ibov)>1 else ibov_close
-        var = ibov_close - ibov_prev
-        ibov_texto = f"Ibovespa: {int(ibov_close):,}".replace(",", ".") + f" ({'+' if var>=0 else '–'}{abs(var):.0f} pts no dia)"
-
-    return render_template("home.html",
-        imagem=imagem, imagem_bar=imagem_bar,
-        resumo=resumo_cards, last_date=last_date_str,
-        categorias=CATEGORIAS, movimentos_dia=mov_dia, movimentos_mes=mov_mes,
-        diario_texto=diario_texto, ibov_texto=ibov_texto
+    # resumo textual
+    ld = pd.Series(mov_dia)
+    comprador = ld.idxmax(); vcomp = ld.max()
+    vendedor  = ld.idxmin(); vvend = ld.min()
+    resumo_dia_txt = (
+        f"Maior comprador: {comprador} ({'+' if vcomp>=0 else '–'} R$ {abs(vcomp):.1f} bi) • "
+        f"Maior vendedor: {vendedor} ({'+' if vvend>=0 else '–'} R$ {abs(vvend):.1f} bi)"
     )
 
+    # ibov do dia
+    ibov_close = df_ibov["Ibovespa"].iloc[-1] if len(df_ibov) else np.nan
+    ibov_prev = df_ibov["Ibovespa"].iloc[-2] if len(df_ibov) > 1 else ibov_close
+    var = (ibov_close - ibov_prev) if pd.notna(ibov_close) and pd.notna(ibov_prev) else 0.0
+    ibov_txt = f"Ibovespa: {int(ibov_close):,}".replace(",", ".") + f" ({'+' if var>=0 else '–'}{abs(var):.0f} pts no dia)" if pd.notna(ibov_close) else "-"
+
+    # última data conhecida
+    last_date_str = last_possible.strftime("%d/%m/%Y")
+
+    return render_template(
+        "home.html",
+        imagem=img_linhas,
+        imagem_bar=img_barras,
+        resumo=resumo_cards,
+        categorias=CATEGORIAS,
+        movimentos_dia=mov_dia,
+        movimentos_mes=mov_mes,
+        resumo_dia_txt=resumo_dia_txt,
+        ibov_txt=ibov_txt,
+        last_date=last_date_str,
+    )
+
+
+# ============================================================================
+# MAIN (local)
+# ============================================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), debug=False)
