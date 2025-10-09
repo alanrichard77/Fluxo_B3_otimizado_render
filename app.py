@@ -1,4 +1,3 @@
-
 import os, io, json, math, base64, logging
 from datetime import datetime, timedelta, date
 from typing import Dict
@@ -11,23 +10,25 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import matplotlib.dates as mdates
 
-# ---------- Setup ----------
+# --------------------------- CONFIGURAÇÃO GERAL ---------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, "templates"),
             static_folder=os.path.join(BASE_DIR, "static"))
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("fluxo-b3")
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# delay padrão da B3 (dias úteis) → ajuste no Render se quiser
 B3_DELAY_DAYS = int(os.getenv("B3_DELAY_DAYS", "2"))
 TZ = os.getenv("TZ", "America/Sao_Paulo")
 
 CATEGORIAS = ["Estrangeiro", "Institucional", "Pessoa Física", "Inst. Financeira", "Outros"]
 
-# ---------- Cache helpers ----------
+# --------------------------- CACHE SIMPLES ---------------------------
 def _cache_path(key: str) -> str: return os.path.join(CACHE_DIR, f"{key}.json")
 def _cache_get(key: str):
     fp = _cache_path(key)
@@ -36,20 +37,20 @@ def _cache_get(key: str):
             with open(fp, "r", encoding="utf-8") as f: return json.load(f)
         except Exception: return None
     return None
-def _cache_set(key: str, data): 
+def _cache_set(key: str, data):
     with open(_cache_path(key), "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False)
 
-# ---------- Data sources (trocar por B3 real no deploy) ----------
+# --------------------------- COLETA DE DADOS ---------------------------
 def fetch_fluxo_b3(start: str, end: str) -> pd.DataFrame:
     """
-    Esperado: série diária acumulada por categoria (R$ bi). 
-    PROD: troque por coleta real (B3/Dados de Mercado, StatusInvest etc.).
+    PROD: substitua por coleta real (B3 / Dados de Mercado / StatusInvest / Fundamentus).
+    Aqui é um fallback sintético apenas para visualização.
     """
-    key = f"fluxo_{start}_{end}"; cached = _cache_get(key)
+    key = f"fluxo_{start}_{end}"
+    cached = _cache_get(key)
     if cached is not None:
         df = pd.DataFrame(cached); df["data"] = pd.to_datetime(df["data"]); return df
 
-    # fallback sintético
     d0, d1 = pd.to_datetime(start), pd.to_datetime(end)
     idx = pd.date_range(d0, d1, freq="D", tz=TZ)
     np.random.seed(42)
@@ -63,7 +64,8 @@ def fetch_fluxo_b3(start: str, end: str) -> pd.DataFrame:
     return base
 
 def fetch_ibov_close(start: str, end: str) -> pd.DataFrame:
-    key = f"ibov_{start}_{end}"; cached = _cache_get(key)
+    key = f"ibov_{start}_{end}"
+    cached = _cache_get(key)
     if cached is not None:
         df = pd.DataFrame(cached); df["data"] = pd.to_datetime(df["data"]); return df
     d0, d1 = pd.to_datetime(start), pd.to_datetime(end)
@@ -73,14 +75,14 @@ def fetch_ibov_close(start: str, end: str) -> pd.DataFrame:
     _cache_set(key, df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
     return df
 
-# ---------- Helpers ----------
+# --------------------------- HELPERS ---------------------------
 def thousand_dot(x, pos=None):
     try: return f"{int(x):,}".replace(",", ".")
     except Exception: return str(x)
 
 def rebase_period(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    first = df.iloc[0][CATEGORIAS]
+    """Zera as séries no 1º dia do período para exibir acumulado YTD."""
+    df = df.copy(); first = df.iloc[0][CATEGORIAS]
     for c in CATEGORIAS: df[c] = df[c] - float(first[c])
     return df
 
@@ -99,7 +101,7 @@ def last_month_movements(df_full: pd.DataFrame) -> Dict[str, float]:
     deltas = m.iloc[-1][CATEGORIAS] - m.iloc[0][CATEGORIAS]
     return {c: float(deltas[c]) for c in CATEGORIAS}
 
-# ---------- Plots ----------
+# --------------------------- GRÁFICOS ---------------------------
 def plot_ytd(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame):
     fig, ax1 = plt.subplots(figsize=(13, 6.5), dpi=150)
     fig.patch.set_facecolor("#0b1220"); ax1.set_facecolor("#0b1220")
@@ -142,13 +144,11 @@ def plot_ytd(df_fluxo: pd.DataFrame, df_ibov: pd.DataFrame):
     return enc
 
 def plot_estrangeiro_30d(df_fluxo_ytd: pd.DataFrame):
-    """Barra horizontal com os últimos 30 DIAS (deltas do estrangeiro)."""
     df = df_fluxo_ytd[["data","Estrangeiro"]].copy()
     df["delta"] = df["Estrangeiro"].diff()
     df = df.dropna().tail(30)
     fig, ax = plt.subplots(figsize=(8, 6), dpi=150)
     fig.patch.set_facecolor("#0b1220"); ax.set_facecolor("#0b1220")
-    # cores: verde/positivo, vermelho/negativo
     colors = ["#16a34a" if v >= 0 else "#ef4444" for v in df["delta"]]
     ax.barh(df["data"].dt.strftime("%d/%m"), df["delta"], color=colors)
     ax.invert_yaxis()
@@ -162,24 +162,19 @@ def plot_estrangeiro_30d(df_fluxo_ytd: pd.DataFrame):
     enc = base64.b64encode(buf.read()).decode("utf-8"); plt.close(fig)
     return enc
 
-# ---------- Route ----------
+# --------------------------- ROTA PRINCIPAL ---------------------------
 @app.route("/", methods=["GET"])
 def home():
-    # 1) Último dia “divulgável” = hoje - delay (dias ÚTEIS)
     last_possible = (pd.Timestamp.today().normalize() - BDay(B3_DELAY_DAYS)).date()
-
-    # 2) Buscar desde jan do ano anterior (para consolidar mês anterior corretamente)
     start_fetch = date(last_possible.year - 1, 1, 1).strftime("%Y-%m-%d")
     today = date.today().strftime("%Y-%m-%d")
     df_fluxo_all = fetch_fluxo_b3(start_fetch, today)
     df_ibov_all  = fetch_ibov_close(start_fetch, today)
 
-    # 3) Fim = min(último registro real, last_possible)
     last_flux_date = df_fluxo_all["data"].max().date()
     end_date = min(last_flux_date, last_possible)
     start_ytd = date(end_date.year, 1, 1)
 
-    # 4) Recorte YTD + rebase
     df_fluxo = df_fluxo_all[(df_fluxo_all["data"].dt.date >= start_ytd) & (df_fluxo_all["data"].dt.date <= end_date)].reset_index(drop=True)
     df_ibov  = df_ibov_all [(df_ibov_all ["data"].dt.date >= start_ytd) & (df_ibov_all ["data"].dt.date <= end_date)].reset_index(drop=True)
     if not df_fluxo.empty: df_fluxo = rebase_period(df_fluxo)
@@ -199,8 +194,7 @@ def home():
         mov_dia = last_day_movements(df_fluxo)
         mov_mes = last_month_movements(df_fluxo_all)
         last_date_str = end_date.strftime("%d/%m/%Y")
-        # resumo escrito do último dia
-        # quem comprou/vendeu = maiores positivos/negativos do dia
+
         ld = pd.Series(mov_dia)
         comprador = ld.idxmax(); vcomp = ld.max()
         vendedor  = ld.idxmin(); vvend = ld.min()
