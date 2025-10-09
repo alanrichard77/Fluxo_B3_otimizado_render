@@ -1,8 +1,19 @@
-diff --git a/templates/home.html b/templates/home.html
-index b75a97994ef2e4892081e85da25e2b7c334e9ab9..43c5ce803c47f67a30fb2efabe1a0fa3c45e6100 100644
---- a/templates/home.html
-+++ b/templates/home.html
-@@ -17,95 +17,96 @@
+ <!DOCTYPE html>
+ <html lang="pt-br">
+ <head>
+   <meta charset="UTF-8" />
+   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+   <title>Fluxo de Investidores B3</title>
+   <script src="https://cdn.tailwindcss.com"></script>
+   <style>
+     .badge { font-size: 10px; padding: 2px 8px; border-radius: 9999px; }
+   </style>
+ </head>
+ <body class="bg-[#0f172a] text-white">
+ <header class="bg-gradient-to-r from-sky-900 to-indigo-900 p-6 text-center shadow-lg">
+   <h1 class="text-3xl font-bold">Fluxo de Investidores B3</h1>
+   <p class="text-sm mt-1 text-slate-300">Acompanhe o movimento de capital no mercado</p>
+ </header>
  
  <main class="max-w-7xl mx-auto px-4 py-8 space-y-8">
  
@@ -12,6 +23,17 @@ index b75a97994ef2e4892081e85da25e2b7c334e9ab9..43c5ce803c47f67a30fb2efabe1a0fa3
      </a>
    </div>
  
++  {% if error_fluxo or error_ibov %}
++  <section class="bg-red-500/10 border border-red-500/40 text-sm text-red-200 rounded-xl p-4">
++    <h2 class="text-base font-semibold mb-1">Aviso</h2>
++    <ul class="list-disc list-inside space-y-1">
++      {% if error_fluxo %}<li>{{ error_fluxo }}</li>{% endif %}
++      {% if error_ibov %}<li>{{ error_ibov }}</li>{% endif %}
++    </ul>
++    <p class="mt-2 text-red-300/80">Tente novamente mais tarde ou verifique a disponibilidade das fontes oficiais.</p>
++  </section>
++  {% endif %}
++
    <!-- Cards de resumo -->
    {% if resumo %}
    <section class="grid grid-cols-1 md:grid-cols-5 gap-3">
@@ -44,6 +66,9 @@ index b75a97994ef2e4892081e85da25e2b7c334e9ab9..43c5ce803c47f67a30fb2efabe1a0fa3
    {% if imagem %}
    <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
      <img src="data:image/png;base64,{{ imagem }}" alt="Fluxo YTD" class="w-full rounded">
++    {% if fluxo_meta and fluxo_meta.get('source') and fluxo_meta.get('source') != 'synthetic' %}
++    <p class="mt-2 text-xs text-slate-300/70">Fonte: {{ fluxo_meta.get('source') }} • Atualizado em {{ fluxo_meta.get('updated_at')|default('-', true) }}</p>
++    {% endif %}
    </div>
    {% endif %}
  
@@ -52,10 +77,14 @@ index b75a97994ef2e4892081e85da25e2b7c334e9ab9..43c5ce803c47f67a30fb2efabe1a0fa3
    <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
      <h2 class="text-lg font-semibold mb-2">Fluxo Estrangeiro — últimos 30 dias</h2>
      <img src="data:image/png;base64,{{ imagem_bar }}" alt="Estrangeiro 30 dias" class="w-full rounded">
++    {% if fluxo_meta and fluxo_meta.get('source') and fluxo_meta.get('source') != 'synthetic' %}
++    <p class="mt-2 text-xs text-slate-300/70">Fonte: {{ fluxo_meta.get('source') }} • Última atualização {{ fluxo_meta.get('updated_at')|default('-', true) }}</p>
++    {% endif %}
    </div>
    {% endif %}
  
    <!-- Bloco textual do último dia + Ibov -->
++  {% if not error_fluxo %}
    <section class="bg-[#0b1220] border border-slate-700 rounded-xl p-4">
      <h2 class="text-lg font-semibold mb-2">Movimentação do último dia disponível</h2>
      <p class="text-sm mb-2 text-slate-300">{{ resumo_dia_txt }}</p>
@@ -92,10 +121,20 @@ index b75a97994ef2e4892081e85da25e2b7c334e9ab9..43c5ce803c47f67a30fb2efabe1a0fa3
        </div>
      </div>
    </section>
++  {% endif %}
  
    <footer class="text-center text-sm text-slate-400 border-t border-slate-700 pt-6">
-     <p><strong>Fonte:</strong> B3 e Dados de Mercado • Último dado de fluxo: {{ last_date }}</p>
+-    <p><strong>Fonte:</strong> B3 e Dados de Mercado • Último dado de fluxo: {{ last_date }}</p>
 -    <p>@alan_richard – Dashboard Fluxo de Investidores • Valores em bilhões de reais</p>
++    <p>
++      <strong>Fonte fluxo:</strong>
++      {% if fluxo_meta and fluxo_meta.get('source') %}{{ fluxo_meta.get('source') }}{% else %}B3 e Dados de Mercado{% endif %}
++      • Último dado de fluxo: {{ last_date }}
++    </p>
++    <p>
++      <strong>Fonte Ibovespa:</strong>
++      {% if ibov_meta and ibov_meta.get('source') %}{{ ibov_meta.get('source') }}{% else %}Yahoo Finance / brapi{% endif %}
++    </p>
 +    <p><a href="https://www.instagram.com/alan_richard/#" class="text-sky-400 hover:text-sky-300" target="_blank" rel="noopener">@alan_richard</a> – Dashboard Fluxo de Investidores • Valores em bilhões de reais</p>
 +    <p>Todos os direitos reservados - 2025</p>
    </footer>
