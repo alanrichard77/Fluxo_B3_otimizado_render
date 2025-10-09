@@ -39,7 +39,7 @@
       <div class="absolute left-0 top-0 h-full w-1.5 rounded-l-xl" style="background: {{ metas[cat]['color'] }}"></div>
       <h3 class="text-sm font-semibold" style="color: {{ metas[cat]['color'] }}">{{ cat }}</h3>
       <p class="text-xl font-bold mt-1">
-        {% if val >= 0 %}+ R$ {{ '%.1f'|format(val)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-val))|replace('.', ',') }} bi{% endif %}
+        {% if val >= 0 %}+ R$ {{ '%.2f'|format(val)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.2f'|format(-val))|replace('.', ',') }} bi{% endif %}
       </p>
       <p class="text-[11px] mt-1 text-slate-300">{{ metas[cat]['label'] }}</p>
       <span class="badge mt-2 inline-block {% if val >= 0 %}bg-green-500/20 text-green-300{% else %}bg-red-500/20 text-red-300{% endif %}">
@@ -79,7 +79,7 @@
           {% set v = movimentos_dia.get(cat, 0.0) %}
           <li><span class="text-slate-300">{{ cat }}</span> •
             <span class="{% if v >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
-              {% if v >= 0 %}+ R$ {{ '%.1f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-v))|replace('.', ',') }} bi{% endif %}
+              {% if v >= 0 %}+ R$ {{ '%.2f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.2f'|format(-v))|replace('.', ',') }} bi{% endif %}
             </span>
           </li>
           {% endfor %}
@@ -92,7 +92,7 @@
           {% set v = movimentos_mes.get(cat, 0.0) %}
           <li><span class="text-slate-300">{{ cat }}</span> •
             <span class="{% if v >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
-              {% if v >= 0 %}+ R$ {{ '%.1f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-v))|replace('.', ',') }} bi{% endif %}
+              {% if v >= 0 %}+ R$ {{ '%.2f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.2f'|format(-v))|replace('.', ',') }} bi{% endif %}
             </span>
           </li>
           {% endfor %}
@@ -103,7 +103,8 @@
 
   <footer class="text-center text-sm text-slate-400 border-t border-slate-700 pt-6">
     <p><strong>Fonte:</strong> B3 e Dados de Mercado • Último dado de fluxo: {{ last_date }}</p>
-    <p>@alan_richard – Dashboard Fluxo de Investidores • Valores em bilhões de reais</p>
+    <p><a href="https://www.instagram.com/alan_richard/#" class="text-sky-400 hover:text-sky-300" target="_blank" rel="noopener">@alan_richard</a> – Dashboard Fluxo de Investidores • Valores em bilhões de reais</p>
+    <p>Todos os direitos reservados - 2025</p>
   </footer>
 </main>
 </body>
