@@ -1,111 +1,105 @@
-<!DOCTYPE html>
-<html lang="pt-br">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Fluxo de Investidores B3</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    .badge { font-size: 10px; padding: 2px 8px; border-radius: 9999px; }
-  </style>
-</head>
-<body class="bg-[#0f172a] text-white">
-<header class="bg-gradient-to-r from-sky-900 to-indigo-900 p-6 text-center shadow-lg">
-  <h1 class="text-3xl font-bold">Fluxo de Investidores B3</h1>
-  <p class="text-sm mt-1 text-slate-300">Acompanhe o movimento de capital no mercado</p>
-</header>
-
-<main class="max-w-7xl mx-auto px-4 py-8 space-y-8">
-
-  <div class="flex items-center justify-end">
-    <a href="/refresh" class="bg-sky-600 hover:bg-sky-500 transition px-4 py-2 rounded-lg text-sm font-semibold shadow">
-      Atualizar gráfico
-    </a>
-  </div>
-
-  <!-- Cards de resumo -->
-  {% if resumo %}
-  <section class="grid grid-cols-1 md:grid-cols-5 gap-3">
-    {% set metas = {
-      'Estrangeiro': {'color':'#3b82f6','label':'fundos e investidores de fora do Brasil'},
-      'Institucional': {'color':'#f59e0b','label':'fundos de pensão, seguradoras, etc.'},
-      'Pessoa Física': {'color':'#22c55e','label':'investidores individuais'},
-      'Inst. Financeira': {'color':'#ec4899','label':'bancos e corretoras'},
-      'Outros': {'color':'#8b5cf6','label':'empresas, governo e não categorizados'}
-    } %}
-    {% for cat in categorias %}
-    {% set val = resumo.get(cat, 0.0) %}
-    <div class="relative bg-[#162338] rounded-xl p-4 shadow-md">
-      <div class="absolute left-0 top-0 h-full w-1.5 rounded-l-xl" style="background: {{ metas[cat]['color'] }}"></div>
-      <h3 class="text-sm font-semibold" style="color: {{ metas[cat]['color'] }}">{{ cat }}</h3>
-      <p class="text-xl font-bold mt-1">
-        {% if val >= 0 %}+ R$ {{ '%.1f'|format(val)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-val))|replace('.', ',') }} bi{% endif %}
-      </p>
-      <p class="text-[11px] mt-1 text-slate-300">{{ metas[cat]['label'] }}</p>
-      <span class="badge mt-2 inline-block {% if val >= 0 %}bg-green-500/20 text-green-300{% else %}bg-red-500/20 text-red-300{% endif %}">
-        {% if val >= 0 %}Entrada líquida{% else %}Saída líquida{% endif %}
-      </span>
-    </div>
-    {% endfor %}
-  </section>
-  {% endif %}
-
-  <!-- Gráfico principal (linhas) -->
-  {% if imagem %}
-  <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
-    <img src="data:image/png;base64,{{ imagem }}" alt="Fluxo YTD" class="w-full rounded">
-  </div>
-  {% endif %}
-
-  <!-- Gráfico estrangeiro 30 dias (barras + MM28) -->
-  {% if imagem_bar %}
-  <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
-    <h2 class="text-lg font-semibold mb-2">Fluxo Estrangeiro — últimos 30 dias</h2>
-    <img src="data:image/png;base64,{{ imagem_bar }}" alt="Estrangeiro 30 dias" class="w-full rounded">
-  </div>
-  {% endif %}
-
-  <!-- Bloco textual do último dia + Ibov -->
-  <section class="bg-[#0b1220] border border-slate-700 rounded-xl p-4">
-    <h2 class="text-lg font-semibold mb-2">Movimentação do último dia disponível</h2>
-    <p class="text-sm mb-2 text-slate-300">{{ resumo_dia_txt }}</p>
-    <p class="text-sm text-slate-300">{{ ibov_txt }}</p>
-
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-      <div>
-        <h3 class="text-sm font-semibold mb-1 text-slate-200">Por player (dia)</h3>
-        <ul class="text-sm leading-7">
-          {% for cat in categorias %}
-          {% set v = movimentos_dia.get(cat, 0.0) %}
-          <li><span class="text-slate-300">{{ cat }}</span> •
-            <span class="{% if v >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
-              {% if v >= 0 %}+ R$ {{ '%.1f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-v))|replace('.', ',') }} bi{% endif %}
-            </span>
-          </li>
-          {% endfor %}
-        </ul>
-      </div>
-      <div>
-        <h3 class="text-sm font-semibold mb-1 text-slate-200">Consolidado do mês anterior</h3>
-        <ul class="text-sm leading-7">
-          {% for cat in categorias %}
-          {% set v = movimentos_mes.get(cat, 0.0) %}
-          <li><span class="text-slate-300">{{ cat }}</span> •
-            <span class="{% if v >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
-              {% if v >= 0 %}+ R$ {{ '%.1f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-v))|replace('.', ',') }} bi{% endif %}
-            </span>
-          </li>
-          {% endfor %}
-        </ul>
-      </div>
-    </div>
-  </section>
-
-  <footer class="text-center text-sm text-slate-400 border-t border-slate-700 pt-6">
-    <p><strong>Fonte:</strong> B3 e Dados de Mercado • Último dado de fluxo: {{ last_date }}</p>
-    <p>@alan_richard – Dashboard Fluxo de Investidores • Valores em bilhões de reais</p>
-  </footer>
-</main>
-</body>
-</html>
-
+diff --git a/templates/home.html b/templates/home.html
+index b75a97994ef2e4892081e85da25e2b7c334e9ab9..43c5ce803c47f67a30fb2efabe1a0fa3c45e6100 100644
+--- a/templates/home.html
++++ b/templates/home.html
+@@ -17,95 +17,96 @@
+ 
+ <main class="max-w-7xl mx-auto px-4 py-8 space-y-8">
+ 
+   <div class="flex items-center justify-end">
+     <a href="/refresh" class="bg-sky-600 hover:bg-sky-500 transition px-4 py-2 rounded-lg text-sm font-semibold shadow">
+       Atualizar gráfico
+     </a>
+   </div>
+ 
+   <!-- Cards de resumo -->
+   {% if resumo %}
+   <section class="grid grid-cols-1 md:grid-cols-5 gap-3">
+     {% set metas = {
+       'Estrangeiro': {'color':'#3b82f6','label':'fundos e investidores de fora do Brasil'},
+       'Institucional': {'color':'#f59e0b','label':'fundos de pensão, seguradoras, etc.'},
+       'Pessoa Física': {'color':'#22c55e','label':'investidores individuais'},
+       'Inst. Financeira': {'color':'#ec4899','label':'bancos e corretoras'},
+       'Outros': {'color':'#8b5cf6','label':'empresas, governo e não categorizados'}
+     } %}
+     {% for cat in categorias %}
+     {% set val = resumo.get(cat, 0.0) %}
+     <div class="relative bg-[#162338] rounded-xl p-4 shadow-md">
+       <div class="absolute left-0 top-0 h-full w-1.5 rounded-l-xl" style="background: {{ metas[cat]['color'] }}"></div>
+       <h3 class="text-sm font-semibold" style="color: {{ metas[cat]['color'] }}">{{ cat }}</h3>
+       <p class="text-xl font-bold mt-1">
+-        {% if val >= 0 %}+ R$ {{ '%.1f'|format(val)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-val))|replace('.', ',') }} bi{% endif %}
++        {% if val >= 0 %}+ R$ {{ '%.2f'|format(val)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.2f'|format(-val))|replace('.', ',') }} bi{% endif %}
+       </p>
+       <p class="text-[11px] mt-1 text-slate-300">{{ metas[cat]['label'] }}</p>
+       <span class="badge mt-2 inline-block {% if val >= 0 %}bg-green-500/20 text-green-300{% else %}bg-red-500/20 text-red-300{% endif %}">
+         {% if val >= 0 %}Entrada líquida{% else %}Saída líquida{% endif %}
+       </span>
+     </div>
+     {% endfor %}
+   </section>
+   {% endif %}
+ 
+   <!-- Gráfico principal (linhas) -->
+   {% if imagem %}
+   <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
+     <img src="data:image/png;base64,{{ imagem }}" alt="Fluxo YTD" class="w-full rounded">
+   </div>
+   {% endif %}
+ 
+   <!-- Gráfico estrangeiro 30 dias (barras + MM28) -->
+   {% if imagem_bar %}
+   <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
+     <h2 class="text-lg font-semibold mb-2">Fluxo Estrangeiro — últimos 30 dias</h2>
+     <img src="data:image/png;base64,{{ imagem_bar }}" alt="Estrangeiro 30 dias" class="w-full rounded">
+   </div>
+   {% endif %}
+ 
+   <!-- Bloco textual do último dia + Ibov -->
+   <section class="bg-[#0b1220] border border-slate-700 rounded-xl p-4">
+     <h2 class="text-lg font-semibold mb-2">Movimentação do último dia disponível</h2>
+     <p class="text-sm mb-2 text-slate-300">{{ resumo_dia_txt }}</p>
+     <p class="text-sm text-slate-300">{{ ibov_txt }}</p>
+ 
+     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+       <div>
+         <h3 class="text-sm font-semibold mb-1 text-slate-200">Por player (dia)</h3>
+         <ul class="text-sm leading-7">
+           {% for cat in categorias %}
+           {% set v = movimentos_dia.get(cat, 0.0) %}
+           <li><span class="text-slate-300">{{ cat }}</span> •
+             <span class="{% if v >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+-              {% if v >= 0 %}+ R$ {{ '%.1f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-v))|replace('.', ',') }} bi{% endif %}
++              {% if v >= 0 %}+ R$ {{ '%.2f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.2f'|format(-v))|replace('.', ',') }} bi{% endif %}
+             </span>
+           </li>
+           {% endfor %}
+         </ul>
+       </div>
+       <div>
+         <h3 class="text-sm font-semibold mb-1 text-slate-200">Consolidado do mês anterior</h3>
+         <ul class="text-sm leading-7">
+           {% for cat in categorias %}
+           {% set v = movimentos_mes.get(cat, 0.0) %}
+           <li><span class="text-slate-300">{{ cat }}</span> •
+             <span class="{% if v >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+-              {% if v >= 0 %}+ R$ {{ '%.1f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-v))|replace('.', ',') }} bi{% endif %}
++              {% if v >= 0 %}+ R$ {{ '%.2f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.2f'|format(-v))|replace('.', ',') }} bi{% endif %}
+             </span>
+           </li>
+           {% endfor %}
+         </ul>
+       </div>
+     </div>
+   </section>
+ 
+   <footer class="text-center text-sm text-slate-400 border-t border-slate-700 pt-6">
+     <p><strong>Fonte:</strong> B3 e Dados de Mercado • Último dado de fluxo: {{ last_date }}</p>
+-    <p>@alan_richard – Dashboard Fluxo de Investidores • Valores em bilhões de reais</p>
++    <p><a href="https://www.instagram.com/alan_richard/#" class="text-sky-400 hover:text-sky-300" target="_blank" rel="noopener">@alan_richard</a> – Dashboard Fluxo de Investidores • Valores em bilhões de reais</p>
++    <p>Todos os direitos reservados - 2025</p>
+   </footer>
+ </main>
+ </body>
+ </html>
+ 
