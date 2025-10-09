@@ -4,4 +4,6 @@ numpy
 matplotlib
 requests
 beautifulsoup4
+lxml
+yfinance
 gunicorn
