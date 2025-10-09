@@ -1,8 +1,3 @@
-diff --git a/app.py b/app.py
-index 8df269a40955615033a2ccedd87c9bd362495270..28058ac3de1a9e01b2ee5e0c3696aa2f353fc87a 100644
---- a/app.py
-+++ b/app.py
-@@ -1,509 +1,664 @@
 -import os, io, json, math, base64, logging, time
 -from datetime import datetime, timedelta, date
 -from typing import Dict, List, Optional, Tuple
@@ -45,16 +40,22 @@ index 8df269a40955615033a2ccedd87c9bd362495270..28058ac3de1a9e01b2ee5e0c3696aa2f
  CACHE_DIR = os.path.join(DATA_DIR, "cache")
  os.makedirs(CACHE_DIR, exist_ok=True)
  
- # Dias ÚTEIS de atraso para a B3 divulgar
+-# Dias ÚTEIS de atraso para a B3 divulgar
  B3_DELAY_DAYS = int(os.getenv("B3_DELAY_DAYS", "2"))
  TZ = os.getenv("TZ", "America/Sao_Paulo")
- 
+-
 -# CSV externo opcional, como fallback de dados
 -FLUXO_CSV_URL = os.getenv("FLUXO_CSV_URL", "").strip()
--
++ALLOW_SYNTHETIC = os.getenv("ALLOW_SYNTHETIC_FALLBACK", "0") == "1"
+ 
  CATEGORIAS = ["Estrangeiro", "Institucional", "Pessoa Física", "Inst. Financeira", "Outros"]
  
  
++class DataUnavailableError(RuntimeError):
++    """Erro específico para ausência de dados reais."""
++    pass
++
++
  # ============================================================================
  # CACHE BÁSICO EM DISCO
  # ============================================================================
@@ -396,52 +397,136 @@ index 8df269a40955615033a2ccedd87c9bd362495270..28058ac3de1a9e01b2ee5e0c3696aa2f
  def get_last_possible_date() -> date:
      return (pd.Timestamp.today().normalize() - BDay(B3_DELAY_DAYS)).date()
  
- def load_fluxo_raw() -> pd.DataFrame:
+-def load_fluxo_raw() -> pd.DataFrame:
++def load_fluxo_raw() -> Tuple[pd.DataFrame, Dict[str, str]]:
      """Dados DIÁRIOS (não acumulados), um por player."""
-     # cache
+-    # cache
      cached = cache_get("fluxo_raw")
      if cached is not None:
-         df = pd.DataFrame(cached)
+-        df = pd.DataFrame(cached)
++        registros = cached.get("records", cached)
++        df = pd.DataFrame(registros)
          df["data"] = pd.to_datetime(df["data"])
 -        return df
-+        if not df.empty and df["data"].dt.date.max() >= get_last_possible_date():
-+            return df
- 
-     # cadeia de fontes
-     df = fetch_fluxo_ddm()
-     if df is None:
+-
+-    # cadeia de fontes
+-    df = fetch_fluxo_ddm()
+-    if df is None:
 -        df = fetch_fluxo_csv()
+-    if df is None:
+-        # fallback sintético
+-        start = date.today().replace(month=1, day=1) - timedelta(days=180)
+-        df = fetch_fluxo_synthetic(start, date.today())
+-
+-    # guarda cache
+-    cache_set("fluxo_raw", df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
+-    return df
++        meta = cached.get("meta", {})
++        if not df.empty and df["data"].dt.date.max() >= get_last_possible_date():
++            return df, meta
++
++    df: Optional[pd.DataFrame] = None
++    meta: Dict[str, str] = {}
++
++    fonte_ddm = fetch_fluxo_ddm()
++    if fonte_ddm is not None and not fonte_ddm.empty:
++        df = fonte_ddm
++        meta = {
++            "source": "Dados de Mercado",
++            "url": DDM_URL,
++            "updated_at": fonte_ddm["data"].max().strftime("%d/%m/%Y"),
++        }
++    else:
 +        start = date.today().replace(month=1, day=1) - timedelta(days=365)
-+        df = fetch_fluxo_b3(start, get_last_possible_date())
-     if df is None:
-         # fallback sintético
-         start = date.today().replace(month=1, day=1) - timedelta(days=180)
-         df = fetch_fluxo_synthetic(start, date.today())
++        fonte_b3 = fetch_fluxo_b3(start, get_last_possible_date())
++        if fonte_b3 is not None and not fonte_b3.empty:
++            df = fonte_b3
++            meta = {
++                "source": "B3 — arquivos oficiais",
++                "url": "https://arquivos.b3.com.br",  # referência institucional
++                "updated_at": fonte_b3["data"].max().strftime("%d/%m/%Y"),
++            }
++
++    if df is None or df.empty:
++        if ALLOW_SYNTHETIC:
++            start = date.today().replace(month=1, day=1) - timedelta(days=180)
++            df = fetch_fluxo_synthetic(start, date.today())
++            meta = {"source": "synthetic", "url": "", "updated_at": df["data"].max().strftime("%d/%m/%Y")}
++        else:
++            raise DataUnavailableError("Não foi possível obter o fluxo de investidores nas fontes oficiais.")
++
++    cache_set(
++        "fluxo_raw",
++        {
++            "records": df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"),
++            "meta": meta,
++        },
++    )
++    return df, meta
  
-     # guarda cache
-     cache_set("fluxo_raw", df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
-     return df
- 
- def load_ibov_history() -> pd.DataFrame:
+-def load_ibov_history() -> pd.DataFrame:
++def load_ibov_history() -> Tuple[pd.DataFrame, Dict[str, str]]:
      cached = cache_get("ibov_hist")
      if cached is not None:
-         df = pd.DataFrame(cached)
+-        df = pd.DataFrame(cached)
++        registros = cached.get("records", cached)
++        df = pd.DataFrame(registros)
          df["data"] = pd.to_datetime(df["data"])
 -        return df
+-
+-    df = fetch_ibov_history_yahoo(2)
+-    if df is None:
+-        df = fetch_ibov_history_brapi()
+-    if df is None:
+-        # fallback sintético
+-        idx = pd.date_range(date.today() - timedelta(days=365), date.today(), freq="D")
+-        serie = 120_000 + np.cumsum(np.random.normal(0, 120, len(idx)))
+-        df = pd.DataFrame({"data": idx, "Ibovespa": serie})
+-
+-    cache_set("ibov_hist", df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
+-    return df
++        meta = cached.get("meta", {})
 +        if not df.empty and df["data"].dt.date.max() >= get_last_possible_date():
-+            return df
- 
-     df = fetch_ibov_history_yahoo(2)
-     if df is None:
-         df = fetch_ibov_history_brapi()
-     if df is None:
-         # fallback sintético
-         idx = pd.date_range(date.today() - timedelta(days=365), date.today(), freq="D")
-         serie = 120_000 + np.cumsum(np.random.normal(0, 120, len(idx)))
-         df = pd.DataFrame({"data": idx, "Ibovespa": serie})
- 
-     cache_set("ibov_hist", df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"))
-     return df
++            return df, meta
++
++    df: Optional[pd.DataFrame] = None
++    meta: Dict[str, str] = {}
++
++    fonte_yahoo = fetch_ibov_history_yahoo(2)
++    if fonte_yahoo is not None and not fonte_yahoo.empty:
++        df = fonte_yahoo
++        meta = {
++            "source": "Yahoo Finance",
++            "url": "https://query1.finance.yahoo.com",
++            "updated_at": fonte_yahoo["data"].max().strftime("%d/%m/%Y"),
++        }
++    else:
++        fonte_brapi = fetch_ibov_history_brapi()
++        if fonte_brapi is not None and not fonte_brapi.empty:
++            df = fonte_brapi
++            meta = {
++                "source": "brapi.dev",
++                "url": "https://brapi.dev",
++                "updated_at": fonte_brapi["data"].max().strftime("%d/%m/%Y"),
++            }
++
++    if df is None or df.empty:
++        if ALLOW_SYNTHETIC:
++            idx = pd.date_range(date.today() - timedelta(days=365), date.today(), freq="D")
++            serie = 120_000 + np.cumsum(np.random.normal(0, 120, len(idx)))
++            df = pd.DataFrame({"data": idx, "Ibovespa": serie})
++            meta = {"source": "synthetic", "url": "", "updated_at": df["data"].max().strftime("%d/%m/%Y")}
++        else:
++            raise DataUnavailableError("Não foi possível obter o histórico do Ibovespa nas fontes oficiais.")
++
++    cache_set(
++        "ibov_hist",
++        {
++            "records": df.assign(data=df["data"].dt.strftime("%Y-%m-%d")).to_dict(orient="list"),
++            "meta": meta,
++        },
++    )
++    return df, meta
  
  def compute_ytd(df_daily: pd.DataFrame, end_date: date) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float]]:
      """Transforma DIÁRIO em ACUMULADO YTD + resumos."""
@@ -556,7 +641,6 @@ index 8df269a40955615033a2ccedd87c9bd362495270..28058ac3de1a9e01b2ee5e0c3696aa2f
      # Y direita: Ibovespa (pts), passo 2.500, com margem
      mn, mx = float(df_ibov["Ibovespa"].min()), float(df_ibov["Ibovespa"].max())
      lo = 2500 * math.floor(mn / 2500) - 2500
-+    lo = max(0, lo)
      hi = 2500 * math.ceil (mx / 2500) + 2500
      ax2.set_ylim(lo, hi)
      ax2.yaxis.set_major_locator(mticker.MultipleLocator(2500))
@@ -696,72 +780,118 @@ index 8df269a40955615033a2ccedd87c9bd362495270..28058ac3de1a9e01b2ee5e0c3696aa2f
  def home():
 -    last_possible = get_last_possible_date()
 -
-     # carrega fontes
-     df_daily = load_fluxo_raw()               # DIÁRIO por player
-     df_ibov_hist = load_ibov_history()        # histórico IBOV
- 
+-    # carrega fontes
+-    df_daily = load_fluxo_raw()               # DIÁRIO por player
+-    df_ibov_hist = load_ibov_history()        # histórico IBOV
+-
+-    # garante recorte do ibov até last_possible
+-    df_ibov = df_ibov_hist[df_ibov_hist["data"].dt.date <= last_possible].copy()
+-    if df_ibov.empty:
+-        df_ibov = df_ibov_hist.copy()
+-    df_ibov = df_ibov.sort_values("data").reset_index(drop=True)
+-
+-    # transforma diário -> acumulado YTD + resumos
+-    df_ytd, resumo_cards, mov_dia, mov_mes = compute_ytd(df_daily, last_possible)
+-
+-    # gráficos
+-    img_linhas = plot_linhas_ytd(df_ytd, df_ibov)
+-    img_barras = plot_estrangeiro_30dias(df_daily, last_possible)
+-
+-    # resumo textual
+-    ld = pd.Series(mov_dia)
+-    comprador = ld.idxmax(); vcomp = ld.max()
+-    vendedor  = ld.idxmin(); vvend = ld.min()
+-    resumo_dia_txt = (
+-        f"Maior comprador: {comprador} ({'+' if vcomp>=0 else '–'} R$ {abs(vcomp):.1f} bi) • "
+-        f"Maior vendedor: {vendedor} ({'+' if vvend>=0 else '–'} R$ {abs(vvend):.1f} bi)"
+-    )
++    df_daily = pd.DataFrame()
++    df_ibov_hist = pd.DataFrame()
++    fluxo_meta: Dict[str, str] = {}
++    ibov_meta: Dict[str, str] = {}
++    error_fluxo: Optional[str] = None
++    error_ibov: Optional[str] = None
++
++    try:
++        df_daily, fluxo_meta = load_fluxo_raw()
++    except DataUnavailableError as exc:
++        error_fluxo = str(exc)
++
++    try:
++        df_ibov_hist, ibov_meta = load_ibov_history()
++    except DataUnavailableError as exc:
++        error_ibov = str(exc)
++
 +    reference_date = get_last_possible_date()
 +    if not df_daily.empty:
 +        reference_date = df_daily["data"].dt.date.max()
 +
-     # garante recorte do ibov até last_possible
--    df_ibov = df_ibov_hist[df_ibov_hist["data"].dt.date <= last_possible].copy()
-+    df_ibov = df_ibov_hist[df_ibov_hist["data"].dt.date <= reference_date].copy()
-     if df_ibov.empty:
-         df_ibov = df_ibov_hist.copy()
-     df_ibov = df_ibov.sort_values("data").reset_index(drop=True)
-+    if not df_ibov.empty:
-+        start_ytd = date(reference_date.year, 1, 1)
-+        df_ibov = df_ibov[df_ibov["data"].dt.date >= start_ytd].reset_index(drop=True)
++    df_ibov = pd.DataFrame()
++    if not df_ibov_hist.empty:
++        df_ibov = df_ibov_hist[df_ibov_hist["data"].dt.date <= reference_date].copy()
++        if df_ibov.empty:
++            df_ibov = df_ibov_hist.copy()
++        df_ibov = df_ibov.sort_values("data").reset_index(drop=True)
++        if not df_ibov.empty and not df_daily.empty:
++            start_ytd = date(reference_date.year, 1, 1)
++            df_ibov = df_ibov[df_ibov["data"].dt.date >= start_ytd].reset_index(drop=True)
++
++    resumo_cards: Dict[str, float] = {c: 0.0 for c in CATEGORIAS}
++    mov_dia: Dict[str, float] = {c: 0.0 for c in CATEGORIAS}
++    mov_mes: Dict[str, float] = {c: 0.0 for c in CATEGORIAS}
++    df_ytd = pd.DataFrame()
++    if not df_daily.empty:
++        df_ytd, resumo_cards, mov_dia, mov_mes = compute_ytd(df_daily, reference_date)
++
++    img_linhas = plot_linhas_ytd(df_ytd, df_ibov) if error_fluxo is None else ""
++    img_barras = plot_estrangeiro_30dias(df_daily, reference_date) if error_fluxo is None else ""
++
++    if error_fluxo is None and not df_daily.empty:
++        ld = pd.Series(mov_dia)
++        comprador = ld.idxmax(); vcomp = ld.max()
++        vendedor  = ld.idxmin(); vvend = ld.min()
++        resumo_dia_txt = (
++            f"Maior comprador: {comprador} ({'+' if vcomp>=0 else '–'}{format_currency_br(abs(vcomp), 2)} bi) • "
++            f"Maior vendedor: {vendedor} ({'+' if vvend>=0 else '–'}{format_currency_br(abs(vvend), 2)} bi)"
++        )
++    else:
++        resumo_dia_txt = ""
  
-     # transforma diário -> acumulado YTD + resumos
--    df_ytd, resumo_cards, mov_dia, mov_mes = compute_ytd(df_daily, last_possible)
-+    df_ytd, resumo_cards, mov_dia, mov_mes = compute_ytd(df_daily, reference_date)
- 
-     # gráficos
-     img_linhas = plot_linhas_ytd(df_ytd, df_ibov)
--    img_barras = plot_estrangeiro_30dias(df_daily, last_possible)
-+    img_barras = plot_estrangeiro_30dias(df_daily, reference_date)
- 
-     # resumo textual
-     ld = pd.Series(mov_dia)
-     comprador = ld.idxmax(); vcomp = ld.max()
-     vendedor  = ld.idxmin(); vvend = ld.min()
-     resumo_dia_txt = (
--        f"Maior comprador: {comprador} ({'+' if vcomp>=0 else '–'} R$ {abs(vcomp):.1f} bi) • "
--        f"Maior vendedor: {vendedor} ({'+' if vvend>=0 else '–'} R$ {abs(vvend):.1f} bi)"
-+        f"Maior comprador: {comprador} ({'+' if vcomp>=0 else '–'}{format_currency_br(abs(vcomp), 2)} bi) • "
-+        f"Maior vendedor: {vendedor} ({'+' if vvend>=0 else '–'}{format_currency_br(abs(vvend), 2)} bi)"
-     )
- 
-     # ibov do dia
-     ibov_close = df_ibov["Ibovespa"].iloc[-1] if len(df_ibov) else np.nan
-     ibov_prev = df_ibov["Ibovespa"].iloc[-2] if len(df_ibov) > 1 else ibov_close
-     var = (ibov_close - ibov_prev) if pd.notna(ibov_close) and pd.notna(ibov_prev) else 0.0
+-    # ibov do dia
+-    ibov_close = df_ibov["Ibovespa"].iloc[-1] if len(df_ibov) else np.nan
+-    ibov_prev = df_ibov["Ibovespa"].iloc[-2] if len(df_ibov) > 1 else ibov_close
+-    var = (ibov_close - ibov_prev) if pd.notna(ibov_close) and pd.notna(ibov_prev) else 0.0
 -    ibov_txt = f"Ibovespa: {int(ibov_close):,}".replace(",", ".") + f" ({'+' if var>=0 else '–'}{abs(var):.0f} pts no dia)" if pd.notna(ibov_close) else "-"
-+    if pd.notna(ibov_close):
++    ibov_txt = "-"
++    if error_ibov is None and not df_ibov.empty:
++        ibov_close = df_ibov["Ibovespa"].iloc[-1]
++        ibov_prev = df_ibov["Ibovespa"].iloc[-2] if len(df_ibov) > 1 else ibov_close
++        var = (ibov_close - ibov_prev) if pd.notna(ibov_close) and pd.notna(ibov_prev) else 0.0
 +        ibov_txt = (
 +            f"Ibovespa: {format_number_br(ibov_close, 2)} pts "
 +            f"({'+' if var>=0 else '–'}{format_number_br(abs(var), 2)} pts no dia)"
 +        )
-+    else:
-+        ibov_txt = "-"
  
-     # última data conhecida
+-    # última data conhecida
 -    last_date_str = last_possible.strftime("%d/%m/%Y")
-+    last_date_str = reference_date.strftime("%d/%m/%Y") if df_daily.size else "-"
++    last_date_str = reference_date.strftime("%d/%m/%Y") if not df_daily.empty else "-"
  
      return render_template(
          "home.html",
          imagem=img_linhas,
          imagem_bar=img_barras,
-         resumo=resumo_cards,
+-        resumo=resumo_cards,
++        resumo=resumo_cards if error_fluxo is None else None,
          categorias=CATEGORIAS,
          movimentos_dia=mov_dia,
          movimentos_mes=mov_mes,
          resumo_dia_txt=resumo_dia_txt,
          ibov_txt=ibov_txt,
          last_date=last_date_str,
++        error_fluxo=error_fluxo,
++        error_ibov=error_ibov,
++        fluxo_meta=fluxo_meta,
++        ibov_meta=ibov_meta,
      )
  
  
