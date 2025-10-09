@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
@@ -33,14 +32,14 @@
   </section>
   {% endif %}
 
-  <!-- Linha YTD -->
+  <!-- Gráfico principal -->
   {% if imagem %}
   <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
     <img src="data:image/png;base64,{{ imagem }}" alt="Gráfico YTD" class="w-full rounded">
   </div>
   {% endif %}
 
-  <!-- Barra Estrangeiro 30d -->
+  <!-- Gráfico Estrangeiro 30 dias -->
   {% if imagem_bar %}
   <div class="bg-[#1e293b] p-4 rounded-xl shadow-lg">
     <h2 class="text-lg font-semibold mb-2">Fluxo Estrangeiro — últimos 30 dias</h2>
@@ -64,26 +63,5 @@
         {% endfor %}
       </ul>
     </div>
-    <div class="bg-[#0b1220] border border-slate-700 rounded-xl p-4">
-      <h2 class="text-lg font-semibold mb-2">Movimentação consolidada do mês anterior</h2>
-      <p class="text-sm mb-2 text-slate-300">{{ ibov_texto }}</p>
-      <ul class="text-sm leading-7">
-        {% for cat in categorias %}
-        {% set v = movimentos_mes.get(cat, 0.0) %}
-        <li><span class="text-slate-300">{{ cat }}</span> • 
-          <span class="{% if v >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
-            {% if v >= 0 %}+ R$ {{ '%.1f'|format(v)|replace('.', ',') }} bi{% else %}– R$ {{ ('%.1f'|format(-v))|replace('.', ',') }} bi{% endif %}
-          </span>
-        </li>
-        {% endfor %}
-      </ul>
-    </div>
-  </section>
 
-  <footer class="text-center text-sm text-slate-400 border-t border-slate-700 pt-6">
-    <p><strong>Fonte:</strong> B3 e Dados de Mercado • Último dado de fluxo: {{ last_date if last_date else '-' }}</p>
-    <p><a class="underline" href="https://www.instagram.com/alan_richard">@alan_richard</a> • Dashboard Fluxo de Investidores • Valores em bilhões de reais</p>
-  </footer>
-</main>
-</body>
-</html>
+    <div class="bg-[#0b1220
