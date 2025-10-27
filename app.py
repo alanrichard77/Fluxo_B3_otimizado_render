@@ -60,7 +60,6 @@ def cache_get(key: str):
     return None
 
 def cache_set(key: str, data):
-    # Garante que as chaves sejam strings (evita erro com tuplas)
     if isinstance(data, dict):
         data = {str(k): v for k, v in data.items()}
     with open(_cache_path(key), "w", encoding="utf-8") as f:
@@ -77,16 +76,21 @@ def cache_clear(prefix: Optional[str] = None):
         except Exception:
             pass
 
-# =============================================================================
-# FONTE — Dados de Mercado
-# =============================================================================
-DDM_URL = "https://www.dadosdemercado.com.br/fluxo"
+def _df_to_cache_payload(df: pd.DataFrame) -> dict:
+    payload = df.copy()
+    if "data" in payload.columns:
+        payload["data"] = pd.to_datetime(payload["data"]).dt.strftime("%Y-%m-%d")
+    dct = payload.to_dict(orient="list")
+    return {str(k): v for k, v in dct.items()}
 
-def _normalize_fluxo_df(df: pd.DataFrame) -> pd.DataFrame:
+# =============================================================================
+# NORMALIZAÇÃO
+# =============================================================================
+def _rename_fluxo_cols(df: pd.DataFrame) -> pd.DataFrame:
     rename_map = {}
     for c in df.columns:
         cl = str(c).strip().lower()
-        if cl == "data":
+        if cl in ("data", "date"):
             rename_map[c] = "data"
         elif "estrange" in cl:
             rename_map[c] = "Estrangeiro"
@@ -98,7 +102,10 @@ def _normalize_fluxo_df(df: pd.DataFrame) -> pd.DataFrame:
             rename_map[c] = "Inst. Financeira"
         elif "outros" in cl:
             rename_map[c] = "Outros"
-    df = df.rename(columns=rename_map)
+    return df.rename(columns=rename_map)
+
+def _normalize_fluxo_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = _rename_fluxo_cols(df)
 
     cols = ["data"] + [c for c in CATEGORIAS if c in df.columns]
     df = df[cols].copy()
@@ -106,13 +113,15 @@ def _normalize_fluxo_df(df: pd.DataFrame) -> pd.DataFrame:
     if "data" not in df.columns or df.empty:
         return pd.DataFrame(columns=["data"] + CATEGORIAS)
 
+    # datas e números
     df["data"] = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
-
     for c in CATEGORIAS:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+            df[c] = pd.to_numeric(str(df[c].dtype).startswith("float") and df[c] or
+                                  df[c].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False),
+                                  errors="coerce")
 
-    # Heurística de escala (se vier em milhões)
+    # heurística de escala (se vier em milhões → /1000)
     for c in CATEGORIAS:
         if c in df.columns and df[c].notna().any():
             med = df[c].abs().median()
@@ -122,17 +131,42 @@ def _normalize_fluxo_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["data"]).sort_values("data").reset_index(drop=True)
     return df
 
+def _detect_is_accumulated(df: pd.DataFrame) -> bool:
+    """
+    Detecta se a série por player já está acumulada.
+    Heurística: diferença média em módulo << valor médio absoluto,
+    e série quase sempre monótona (poucas inversões de sinal no delta).
+    """
+    inv = 0
+    total = 0
+    for c in CATEGORIAS:
+        if c in df.columns:
+            s = df[c].dropna()
+            if len(s) >= 3:
+                d = s.diff().dropna()
+                inv += (np.sign(d) != 0).sum()
+                total += len(d)
+    if total == 0:
+        return False
+    ratio = inv / total
+    # se a maioria dos dias tem delta pequeno e mantém o mesmo sinal, tende a acumulado
+    return ratio < 0.25
+
+# =============================================================================
+# FONTES — Fluxo
+# =============================================================================
+DDM_URL = "https://www.dadosdemercado.com.br/fluxo"
+CF_URL  = "https://carteirafundos.com.br/fluxo"
+BHM_URL = "https://www.bhmoptions.com.br/participantes"
+
 def fetch_fluxo_ddm() -> Optional[pd.DataFrame]:
     try:
-        logger.info("Coletando fluxo em Dados de Mercado…")
-        html = requests.get(DDM_URL, timeout=25).text
+        logger.info("Coletando fluxo: Dados de Mercado…")
+        html = requests.get(DDM_URL, timeout=25, headers={"User-Agent":"Mozilla/5.0"}).text
         tables = pd.read_html(html, thousands=".", decimal=",")
-        candidates = [t for t in tables if any(str(c).strip().lower() == "data" for c in t.columns)]
-        df = None
-        if candidates:
-            candidates.sort(key=lambda d: d.shape[0], reverse=True)
-            df = candidates[0]
-        else:
+        candidates = [t for t in tables if any(str(c).strip().lower() in ("data","date") for c in t.columns)]
+        df = candidates[0] if candidates else None
+        if df is None or df.empty:  # fallback: primeira tabela
             soup = BeautifulSoup(html, "html.parser")
             table = soup.find("table")
             if table:
@@ -141,53 +175,67 @@ def fetch_fluxo_ddm() -> Optional[pd.DataFrame]:
             return None
         return _normalize_fluxo_df(df)
     except Exception as e:
-        logger.warning(f"Falha ao coletar Dados de Mercado: {e}")
+        logger.warning(f"Falha DDM: {e}")
         return None
 
-# =============================================================================
-# FONTE — CSV externo (opcional)
-# =============================================================================
+def fetch_fluxo_carteirafundos() -> Optional[pd.DataFrame]:
+    try:
+        logger.info("Coletando fluxo: CarteiraFundos…")
+        html = requests.get(CF_URL, timeout=25, headers={"User-Agent":"Mozilla/5.0"}).text
+        tables = pd.read_html(html, thousands=".", decimal=",")
+        # nesta página costuma haver uma tabela grande com Data e colunas por player
+        tables.sort(key=lambda d: d.shape[0], reverse=True)
+        for t in tables:
+            if any(str(c).strip().lower() in ("data","date") for c in t.columns):
+                df = _normalize_fluxo_df(t)
+                if not df.empty:
+                    return df
+        return None
+    except Exception as e:
+        logger.warning(f"Falha CarteiraFundos: {e}")
+        return None
+
+def fetch_fluxo_bhmoptions() -> Optional[pd.DataFrame]:
+    try:
+        logger.info("Coletando fluxo: BHM Options…")
+        html = requests.get(BHM_URL, timeout=25, headers={"User-Agent":"Mozilla/5.0"}).text
+        tables = pd.read_html(html, thousands=".", decimal=",")
+        tables.sort(key=lambda d: d.shape[0], reverse=True)
+        for t in tables:
+            if any(str(c).strip().lower() in ("data","date") for c in t.columns):
+                df = _normalize_fluxo_df(t)
+                if not df.empty:
+                    return df
+        return None
+    except Exception as e:
+        logger.warning(f"Falha BHM Options: {e}")
+        return None
+
 def fetch_fluxo_csv() -> Optional[pd.DataFrame]:
     if not FLUXO_CSV_URL:
         return None
     try:
         logger.info(f"Coletando CSV externo: {FLUXO_CSV_URL}")
         df = pd.read_csv(FLUXO_CSV_URL)
-        rename = {
-            "data": "data",
-            "Estrangeiro": "Estrangeiro",
-            "Institucional": "Institucional",
-            "Pessoa Física": "Pessoa Física",
-            "Inst. Financeira": "Inst. Financeira",
-            "Outros": "Outros",
-        }
-        df = df.rename(columns=rename)
-        df["data"] = pd.to_datetime(df["data"], errors="coerce")
-        for c in CATEGORIAS:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-        df = df.dropna(subset=["data"]).sort_values("data").reset_index(drop=True)
+        df = _normalize_fluxo_df(df)
         return df
     except Exception as e:
-        logger.warning(f"Falha ao coletar CSV externo: {e}")
+        logger.warning(f"Falha CSV externo: {e}")
         return None
 
-# =============================================================================
-# Fallback sintético
-# =============================================================================
 def fetch_fluxo_synthetic(start: date, end: date) -> pd.DataFrame:
     idx = pd.date_range(start, end, freq="D")
     np.random.seed(42)
     base = pd.DataFrame({"data": idx})
-    base["Estrangeiro"]     = np.random.normal(0.06, 0.28, len(idx))
-    base["Institucional"]   = np.random.normal(-0.03, 0.16, len(idx))
-    base["Pessoa Física"]   = np.random.normal(0.01, 0.05, len(idx))
-    base["Inst. Financeira"]= np.random.normal(0.006, 0.04, len(idx))
-    base["Outros"]          = np.random.normal(0.00, 0.03, len(idx))
+    base["Estrangeiro"]      = np.random.normal(0.06, 0.28, len(idx))
+    base["Institucional"]    = np.random.normal(-0.03, 0.16, len(idx))
+    base["Pessoa Física"]    = np.random.normal(0.01, 0.05, len(idx))
+    base["Inst. Financeira"] = np.random.normal(0.006, 0.04, len(idx))
+    base["Outros"]           = np.random.normal(0.00, 0.03, len(idx))
     return base
 
 # =============================================================================
-# IBOVESPA – yfinance + Yahoo Chart API (fallback)
+# IBOVESPA – yfinance + Yahoo Chart API
 # =============================================================================
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex):
@@ -204,19 +252,15 @@ def fetch_ibov_history_yfinance(start: date, end: date) -> Optional[pd.DataFrame
         if data is None or data.empty:
             return None
         data = _flatten_columns(data)
-        # Colunas comuns: Open, High, Low, Close, Adj Close, Volume
         close_col = None
         for c in data.columns:
             if c.lower().endswith("close"):
                 if c.lower() == "close":
-                    close_col = c
-                    break
-                close_col = c  # guarda a melhor opção
-        if close_col is None:
-            return None
-        df = data.reset_index().rename(columns={"Date": "data", close_col: "Ibovespa"})[["data", "Ibovespa"]]
-        df["data"] = pd.to_datetime(df["data"])
-        df["Ibovespa"] = pd.to_numeric(df["Ibovespa"], errors="coerce")
+                    close_col = c; break
+                close_col = c
+        if close_col is None: return None
+        df = data.reset_index().rename(columns={"Date":"data", close_col:"Ibovespa"})[["data","Ibovespa"]]
+        df["data"] = pd.to_datetime(df["data"]); df["Ibovespa"] = pd.to_numeric(df["Ibovespa"], errors="coerce")
         df = df.dropna().sort_values("data").reset_index(drop=True)
         return df
     except Exception as e:
@@ -225,49 +269,50 @@ def fetch_ibov_history_yfinance(start: date, end: date) -> Optional[pd.DataFrame
 
 def fetch_ibov_history_yahoo_chart(years: int = 2) -> Optional[pd.DataFrame]:
     try:
-        end = int(time.time())
-        start = end - 60 * 60 * 24 * 365 * years
+        end = int(time.time()); start = end - 60*60*24*365*years
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?period1={start}&period2={end}&interval=1d"
-        r = requests.get(url, timeout=25)
-        j = r.json()
+        j = requests.get(url, timeout=25).json()
         res = j["chart"]["result"][0]
-        ts = res["timestamp"]
-        closes = res["indicators"]["quote"][0]["close"]
+        ts  = res["timestamp"]; closes = res["indicators"]["quote"][0]["close"]
         df = pd.DataFrame({"data": pd.to_datetime(ts, unit="s"), "Ibovespa": closes})
         df = df.dropna().sort_values("data").reset_index(drop=True)
         return df
     except Exception as e:
-        logger.warning(f"Falha Yahoo Chart API: {e}")
+        logger.warning(f"Falha Yahoo Chart: {e}")
         return None
 
 # =============================================================================
-# PIPELINE (com cache)
+# PIPELINE (com cache) — retorna (df, fonte_primaria)
 # =============================================================================
 def get_last_possible_date() -> date:
     return (pd.Timestamp.today().normalize() - BDay(B3_DELAY_DAYS)).date()
 
-def _df_to_cache_payload(df: pd.DataFrame) -> dict:
-    # data -> string ISO/Date; chaves str
-    payload = df.copy()
-    if "data" in payload.columns:
-        payload["data"] = pd.to_datetime(payload["data"]).dt.strftime("%Y-%m-%d")
-    dct = payload.to_dict(orient="list")
-    return {str(k): v for k, v in dct.items()}
-
-def load_fluxo_raw() -> pd.DataFrame:
+def load_fluxo_raw() -> Tuple[pd.DataFrame, str]:
     cached = cache_get("fluxo_raw")
+    cached_src = cache_get("fluxo_raw_src")
     if cached is not None:
-        df = pd.DataFrame(cached); df["data"] = pd.to_datetime(df["data"]); return df
+        df = pd.DataFrame(cached); df["data"] = pd.to_datetime(df["data"])
+        return df, (cached_src or "cache")
 
-    df = fetch_fluxo_ddm()
-    if df is None:
-        df = fetch_fluxo_csv()
-    if df is None:
-        start = date.today().replace(month=1, day=1) - timedelta(days=180)
-        df = fetch_fluxo_synthetic(start, date.today())
+    # cadeia de fontes
+    for src_name, fn in [
+        ("Dados de Mercado",    fetch_fluxo_ddm),
+        ("CarteiraFundos",      fetch_fluxo_carteirafundos),
+        ("BHM Options",         fetch_fluxo_bhmoptions),
+        ("CSV Externo",         fetch_fluxo_csv),
+    ]:
+        df = fn()
+        if df is not None and not df.empty:
+            cache_set("fluxo_raw", _df_to_cache_payload(df))
+            cache_set("fluxo_raw_src", {"src": src_name})
+            return df, src_name
 
+    # fallback sintético
+    start = date.today().replace(month=1, day=1) - timedelta(days=180)
+    df = fetch_fluxo_synthetic(start, date.today())
     cache_set("fluxo_raw", _df_to_cache_payload(df))
-    return df
+    cache_set("fluxo_raw_src", {"src": "sintético"})
+    return df, "sintético"
 
 def load_ibov_history(start: date, end: date) -> pd.DataFrame:
     key = f"ibov_hist_{start}_{end}"
@@ -279,209 +324,4 @@ def load_ibov_history(start: date, end: date) -> pd.DataFrame:
     if df is None:
         df = fetch_ibov_history_yahoo_chart(2)
         if df is not None:
-            df = df[(df["data"].dt.date >= start) & (df["data"].dt.date <= end)].copy()
-
-    if df is None:
-        idx = pd.date_range(start, end, freq="D")
-        serie = 120_000 + np.cumsum(np.random.normal(0, 120, len(idx)))
-        df = pd.DataFrame({"data": idx, "Ibovespa": serie})
-
-    cache_set(key, _df_to_cache_payload(df))
-    return df
-
-# =============================================================================
-# TRANSFORMAÇÕES
-# =============================================================================
-def compute_ytd(df_daily: pd.DataFrame, end_date: date) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, float], Dict[str, float]]:
-    start_ytd = date(end_date.year, 1, 1)
-    dfd = df_daily[(df_daily["data"].dt.date >= start_ytd) & (df_daily["data"].dt.date <= end_date)].copy()
-    dfd = dfd.sort_values("data").reset_index(drop=True)
-    for c in CATEGORIAS:
-        if c in dfd.columns:
-            dfd[c] = dfd[c].fillna(0).cumsum()
-    resumo_cards = {c: float(dfd[c].dropna().iloc[-1]) if c in dfd.columns and len(dfd) else 0.0 for c in CATEGORIAS}
-
-    dl = df_daily[df_daily["data"].dt.date <= end_date].copy().sort_values("data")
-    mov_dia = {c: 0.0 for c in CATEGORIAS}
-    if len(dl) >= 2:
-        last = dl.iloc[-1][CATEGORIAS]
-        prev = dl.iloc[-2][CATEGORIAS]
-        mov_dia = {c: float(last[c] - prev[c]) for c in CATEGORIAS}
-
-    mov_mes = {c: 0.0 for c in CATEGORIAS}
-    if not dl.empty:
-        last_date = dl["data"].dt.date.max()
-        ref = (last_date.replace(day=1) - timedelta(days=1))
-        month_start = ref.replace(day=1)
-        m = dl[(dl["data"].dt.date >= month_start) & (dl["data"].dt.date <= ref)].copy()
-        if len(m) >= 2:
-            delta = m.iloc[-1][CATEGORIAS] - m.iloc[0][CATEGORIAS]
-            mov_mes = {c: float(delta.get(c, 0.0)) for c in CATEGORIAS}
-
-    return dfd, resumo_cards, mov_dia, mov_mes
-
-# =============================================================================
-# PLOTS
-# =============================================================================
-def thousand_dot(x, pos=None):
-    try:
-        return f"{int(x):,}".replace(",", ".")
-    except Exception:
-        return str(x)
-
-def plot_linhas_ytd(df_ytd: pd.DataFrame, df_ibov: pd.DataFrame) -> str:
-    fig, ax1 = plt.subplots(figsize=(14, 6.7), dpi=150)
-    fig.patch.set_facecolor("#0b1220")
-    ax1.set_facecolor("#0b1220")
-    ax2 = ax1.twinx()
-
-    colors = {
-        "Estrangeiro": "#50a7ff",
-        "Institucional": "#ff7f0e",
-        "Pessoa Física": "#22c55e",
-        "Inst. Financeira": "#ec4899",
-        "Outros": "#8b5cf6",
-    }
-    for col in CATEGORIAS:
-        if col in df_ytd.columns:
-            ax1.plot(df_ytd["data"], df_ytd[col], label=col, linewidth=2, color=colors.get(col))
-
-    if not df_ibov.empty:
-        ax2.plot(df_ibov["data"], df_ibov["Ibovespa"], linestyle=":", linewidth=2.2, color="white", label="Ibovespa (pontilhado)")
-
-    days = (df_ytd["data"].max() - df_ytd["data"].min()).days
-    if days <= 185:
-        ax1.xaxis.set_major_locator(mdates.DayLocator(interval=7))
-        ax1.xaxis.set_majorFormatter(mdates.DateFormatter("%b/%y"))
-    else:
-        ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
-        ax1.xaxis.set_majorFormatter(mdates.DateFormatter("%b/%y"))
-
-    ax1.yaxis.set_major_locator(mticker.MultipleLocator(5))
-    ax1.set_ylabel("Acumulado (R$ bilhões)", color="white", labelpad=8)
-
-    if not df_ibov.empty:
-        mn, mx = float(df_ibov["Ibovespa"].min()), float(df_ibov["Ibovespa"].max())
-        lo = 2500 * math.floor(mn / 2500) - 2500
-        hi = 2500 * math.ceil (mx / 2500) + 2500
-        ax2.set_ylim(lo, hi)
-        ax2.yaxis.set_major_locator(mticker.MultipleLocator(2500))
-        ax2.yaxis.set_major_formatter(mticker.FuncFormatter(thousand_dot))
-        ax2.set_ylabel("Ibovespa (pts)", color="white", labelpad=8)
-
-    for sp in ["top", "right", "bottom", "left"]:
-        ax1.spines[sp].set_color("#233148")
-        ax2.spines[sp].set_color("#233148")
-    ax1.tick_params(axis="x", colors="white"); ax1.tick_params(axis="y", colors="white")
-    ax2.tick_params(axis="y", colors="white")
-
-    l1, lb1 = ax1.get_legend_handles_labels()
-    l2, lb2 = ax2.get_legend_handles_labels()
-    leg = ax1.legend(l1 + l2, lb1 + lb2, loc="upper left", frameon=False, fontsize=9)
-    for t in leg.get_texts(): t.set_color("white")
-
-    fig.text(0.5, 0.5, "@alan_richard", fontsize=28, color="gray", alpha=0.06, ha="center", va="center")
-
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
-    buf.seek(0)
-    encoded = base64.b64encode(buf.read()).decode("utf-8")
-    plt.close(fig)
-    return encoded
-
-def plot_estrangeiro_30dias(df_daily: pd.DataFrame, end_date: date) -> str:
-    d = df_daily[df_daily["data"].dt.date <= end_date].copy().sort_values("data")
-    d["estrangeiro"] = d["Estrangeiro"].fillna(0.0)
-    d["mm28"] = d["estrangeiro"].rolling(28, min_periods=1).mean()
-    d = d.tail(30).copy()
-
-    fig, ax = plt.subplots(figsize=(14, 6.0), dpi=150)
-    fig.patch.set_facecolor("#0b1220"); ax.set_facecolor("#0b1220")
-
-    colors = ["#22c55e" if v >= 0 else "#ef4444" for v in d["estrangeiro"]]
-    ax.bar(d["data"], d["estrangeiro"], color=colors, width=0.85, zorder=2)
-    ax.plot(d["data"], d["mm28"], color="#f59e0b", linewidth=2.0, label="Média 28", zorder=3)
-
-    for x, y in zip(d["data"], d["estrangeiro"]):
-        va = "bottom" if y >= 0 else "top"
-        off = 0.03 if y >= 0 else -0.03
-        ax.text(x, y + off, f"{y:+.2f}", ha="center", va=va, fontsize=8, color="white")
-
-    ax.axhline(0, color="#233148", linewidth=1)
-    ax.set_ylabel("R$ bi (diário)", color="white")
-    ax.xaxis.set_major_locator(mdates.DayLocator(interval=3))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
-    ax.tick_params(axis="x", colors="white"); ax.tick_params(axis="y", colors="white")
-    for sp in ["top", "right", "bottom", "left"]:
-        ax.spines[sp].set_color("#233148")
-    ax.legend(frameon=False, fontsize=9, loc="upper left", labelcolor="white")
-
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", facecolor=fig.get_facecolor(), bbox_inches="tight")
-    buf.seek(0)
-    encoded = base64.b64encode(buf.read()).decode("utf-8")
-    plt.close(fig)
-    return encoded
-
-# =============================================================================
-# ROTAS
-# =============================================================================
-@app.route("/refresh")
-def refresh():
-    cache_clear()
-    return redirect(url_for("home"))
-
-@app.route("/", methods=["GET"])
-def home():
-    last_possible = get_last_possible_date()
-
-    df_daily = load_fluxo_raw()
-
-    start_for_ibov = date(last_possible.year, 1, 1) - timedelta(days=10)
-    df_ibov_hist = load_ibov_history(start_for_ibov, last_possible)
-    df_ibov = df_ibov_hist[df_ibov_hist["data"].dt.date <= last_possible].copy().sort_values("data").reset_index(drop=True)
-
-    df_ytd, resumo_cards, mov_dia, mov_mes = compute_ytd(df_daily, last_possible)
-
-    img_linhas = plot_linhas_ytd(df_ytd, df_ibov)
-    img_barras = plot_estrangeiro_30dias(df_daily, last_possible)
-
-    ld = pd.Series(mov_dia)
-    comprador = ld.idxmax(); vcomp = ld.max()
-    vendedor  = ld.idxmin(); vvend = ld.min()
-    resumo_dia_txt = (
-        f"Maior comprador: {comprador} ({'+' if vcomp>=0 else '–'} R$ {abs(vcomp):.1f} bi) • "
-        f"Maior vendedor: {vendedor} ({'+' if vvend>=0 else '–'} R$ {abs(vvend):.1f} bi)"
-    )
-
-    ibov_close = df_ibov["Ibovespa"].iloc[-1] if len(df_ibov) else np.nan
-    ibov_prev  = df_ibov["Ibovespa"].iloc[-2] if len(df_ibov) > 1 else ibov_close
-    var = (ibov_close - ibov_prev) if pd.notna(ibov_close) and pd.notna(ibov_prev) else 0.0
-    ibov_txt = (
-        f"Ibovespa: {int(ibov_close):,}".replace(",", ".")
-        + f" ({'+' if var>=0 else '–'}{abs(int(var))} pts no dia)"
-        if pd.notna(ibov_close) else "-"
-    )
-
-    last_date_str = last_possible.strftime("%d/%m/%Y")
-
-    return render_template(
-        "home.html",
-        imagem=img_linhas,
-        imagem_bar=img_barras,
-        resumo=resumo_cards,
-        categorias=CATEGORIAS,
-        movimentos_dia=mov_dia,
-        movimentos_mes=mov_mes,
-        resumo_dia_txt=resumo_dia_txt,
-        ibov_txt=ibov_txt,
-        last_date=last_date_str,
-    )
-
-# =============================================================================
-# MAIN
-# =============================================================================
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), debug=False)
+            df = df[(df["data"].dt.date >= start) & (df["data"].dt.date <= end)].
