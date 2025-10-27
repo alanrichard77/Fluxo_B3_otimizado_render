@@ -73,38 +73,36 @@ def _normalize_player(name):
     name = str(name).strip()
     return PLAYER_MAP.get(name, name)
 
-def get_daily_flows_cards():
+def get_series_by_player():
     """
-    Constrói cards de acumulado do ano por player, com indicação de entrada/saída.
-    Fonte primária: CarteiraFundos, fallback: BHM.
+    Retorna DataFrame (date, player, net) com tolerância:
+    - tenta CarteiraFundos, depois BHM
+    - se vazio, usa snapshot local
+    - nunca levanta exceção, retorna DataFrame vazio
     """
-    df = _get_players_from_carteirafundos()
-    if df is None or df.empty:
-        df = _get_players_from_bhm()
-    if df is None or df.empty:
-        raise RuntimeError("Falha em obter dados de players.")
-    # Último valor acumulado por player
-    last = (
-        df.sort_values("date")
-          .groupby("player", as_index=False)["net"].last()
-          .rename(columns={"net": "acumulado_ano"})
-    )
-    last["sinal"] = np.where(last["acumulado_ano"] >= 0, "Entrada líquida", "Saída líquida")
-    # Formatação
-    last["valor_str"] = last["acumulado_ano"].apply(_fmt_brl_bi)
-    # cards esperados:
-    cards = {}
-    for pl in ["Estrangeiro", "Institucional", "Pessoa Física", "Inst. Financeira", "Outros"]:
-        row = last[last["player"] == pl]
-        if row.empty:
-            continue
-        v = float(row["acumulado_ano"].values[0])
-        cards[pl] = {
-            "valor": v,
-            "texto": "Entrada líquida" if v >= 0 else "Saída líquida",
-            "formatado": _fmt_brl_bi(v),
-        }
-    return {"ok": True, "cards": cards}
+    df1 = _get_players_from_carteirafundos()
+    df2 = _get_players_from_bhm()
+
+    base = None
+    if df1 is not None and not df1.empty:
+        base = df1
+    elif df2 is not None and not df2.empty:
+        base = df2
+    else:
+        base = _load_snapshot()
+
+    if base is None or base.empty:
+        return pd.DataFrame(columns=["date", "player", "net"])
+
+    base["date"] = pd.to_datetime(base["date"]).dt.date
+    base["player"] = base["player"].apply(_normalize_player)
+    base = base.dropna(subset=["player"])
+    base = base.groupby(["date", "player"], as_index=False)["net"].sum()
+
+    # snapshot
+    _save_snapshot(base)
+
+    return base
 
 def get_series_by_player():
     """
