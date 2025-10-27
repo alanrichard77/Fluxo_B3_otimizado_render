@@ -1,5 +1,4 @@
 import json
-from datetime import datetime
 from dateutil import parser as dtparser
 
 def to_plotly_json(fig):
@@ -10,6 +9,5 @@ def parse_date(s):
         return None
     try:
         return dtparser.parse(s).date()
-    except:
+    except Exception:
         return None
-
