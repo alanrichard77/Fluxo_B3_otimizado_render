@@ -15,9 +15,7 @@
       <button id="btnRefresh">Atualizar Gráfico</button>
     </header>
 
-    <section class="cards" id="cards">
-      <!-- preenchido via JS -->
-    </section>
+    <section class="cards" id="cards"></section>
 
     <section class="charts">
       <div class="chart-card">
@@ -43,10 +41,10 @@
     </section>
 
     <footer>
-  <div class="watermark">@alan_richard</div>
-  <p>Fonte: B3 - Última coleta automática, <span id="updateDate"></span>. Valores em bilhões de reais.</p>
-  <p><a href="https://instagram.com/alan_richard" target="_blank">@alan_richard</a> • Dashboard Fluxo de Investidores</p>
-</footer>
+      <div class="watermark">@alan_richard</div>
+      <p>Fonte, B3 e Dados de Mercado. Última coleta automática, <span id="updateDate"></span>. Valores em bilhões de reais.</p>
+      <p><a href="https://instagram.com/alan_richard" target="_blank">@alan_richard</a> • Dashboard Fluxo de Investidores</p>
+    </footer>
   </div>
 
   <script src="{{ url_for('static', filename='js/main.js') }}"></script>
