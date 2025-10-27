@@ -6,6 +6,23 @@ import requests
 from io import StringIO
 from datetime import datetime, timedelta
 import yfinance as yf
+import os
+SNAPSHOT_PATH = os.path.join(os.path.dirname(__file__), "players_snapshot.parquet")
+
+def _save_snapshot(df: pd.DataFrame):
+    try:
+        if df is not None and not df.empty:
+            df.to_parquet(SNAPSHOT_PATH, index=False)
+    except Exception as e:
+        logger.warning("Falha ao salvar snapshot: %s", e)
+
+def _load_snapshot() -> pd.DataFrame | None:
+    try:
+        if os.path.exists(SNAPSHOT_PATH):
+            return pd.read_parquet(SNAPSHOT_PATH)
+    except Exception as e:
+        logger.warning("Falha ao carregar snapshot: %s", e)
+    return None
 
 logger = logging.getLogger("fluxo_b3")
 
