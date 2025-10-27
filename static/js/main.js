@@ -46,10 +46,10 @@ async function renderCharts(){
   const start = new Date(now.getTime() - 180*24*3600*1000).toISOString().slice(0,10);
   const end = now.toISOString().slice(0,10);
   const data = await fetchJSON(`/api/series?start=${start}&end=${end}`);
-  Plotly.newPlot("fig_main", data.fig_main.data, data.fig_main.layout, {displaylogo:false, responsive:true});
-  Plotly.newPlot("fig_daily", data.fig_daily.data, data.fig_daily.layout, {displaylogo:false, responsive:true});
-  Plotly.newPlot("fig_leaders", data.fig_leaders.data, data.fig_leaders.layout, {displaylogo:false, responsive:true});
-  Plotly.newPlot("fig_heat", data.fig_heat.data, data.fig_heat.layout, {displaylogo:false, responsive:true});
+  Plotly.newPlot("fig_main", ensureFigure(data.fig_main).data, ensureFigure(data.fig_main).layout, {displaylogo:false, responsive:true});
+  Plotly.newPlot("fig_daily", ensureFigure(data.fig_daily).data, ensureFigure(data.fig_daily).layout, {displaylogo:false, responsive:true});
+  Plotly.newPlot("fig_leaders", ensureFigure(data.fig_leaders).data, ensureFigure(data.fig_leaders).layout, {displaylogo:false, responsive:true});
+  Plotly.newPlot("fig_heat", ensureFigure(data.fig_heat).data, ensureFigure(data.fig_heat).layout, {displaylogo:false, responsive:true});
   document.getElementById("updateDate").textContent = new Date().toLocaleString("pt-BR");
 }
 
