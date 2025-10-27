@@ -1,3 +1,8 @@
+function ensureFigure(fig){
+  if(!fig || !fig.data){ return {data:[], layout:{}}; }
+  return fig;
+}
+
 async function fetchJSON(url, opts){
   const r = await fetch(url, opts);
   if(!r.ok){ throw new Error("Falha HTTP "+r.status); }
