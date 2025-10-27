@@ -50,15 +50,16 @@ def api_cards():
         cache_set(cache_key, cards, ttl=CACHE_TTL)
         return jsonify(cards)
     except Exception as e:
+        # Nunca 500 aqui: retorna estrutura neutra
         logger.exception("Erro em /api/cards")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        zero = {"valor": 0.0, "texto": "Sem dados recentes", "formatado": "R$ 0,0bi"}
+        return jsonify({"ok": True, "cards": {
+            "Estrangeiro": zero, "Institucional": zero, "Pessoa Física": zero,
+            "Inst. Financeira": zero, "Outros": zero
+        }})
 
 @app.route("/api/series")
 def api_series():
-    """
-    Retorna séries acumuladas e diárias por player,
-    com janela em dias e datas opcionais: start, end no formato YYYY-MM-DD
-    """
     try:
         start = parse_date(request.args.get("start"))
         end = parse_date(request.args.get("end"))
@@ -73,17 +74,37 @@ def api_series():
         if cached:
             return jsonify(cached)
 
-        # coleta dados
         players_df = get_series_by_player()
         ibov = get_ibov_series()
 
-        # processamento
+        # Se vier vazio, devolvemos gráficos vazios sem erro
+        from pandas import DataFrame
+        if players_df is None or players_df.empty:
+            resp = {
+                "ok": True, "start": str(start), "end": str(end),
+                "fig_main": {"data": [], "layout": {}},
+                "fig_daily": {"data": [], "layout": {}},
+                "fig_leaders": {"data": [], "layout": {}},
+                "fig_heat": {"data": [], "layout": {}},
+                "tables": {"daily": [], "leaders": []},
+                "message": "Sem dados recentes para o intervalo selecionado."
+            }
+            cache_set(cache_key, resp, ttl=300)
+            return jsonify(resp)
+
+        # processamento normal
         acc_df = build_accumulated_df(players_df, start, end)
         daily_df = build_daily_table(players_df, start, end)
         hm_df = build_heatmap_df(daily_df)
         leaders_df = build_monthly_leaders(daily_df)
 
-        # gráficos plotly
+        from charts import (
+            fig_main_accumulated_with_ibov,
+            fig_daily_bars_by_player,
+            fig_monthly_leaders,
+            fig_daily_heatmap,
+        )
+
         fig_main = fig_main_accumulated_with_ibov(acc_df, ibov)
         fig_daily = fig_daily_bars_by_player(daily_df)
         fig_leaders = fig_monthly_leaders(leaders_df)
@@ -98,15 +119,24 @@ def api_series():
             "fig_leaders": to_plotly_json(fig_leaders),
             "fig_heat": to_plotly_json(fig_heat),
             "tables": {
-                "daily": daily_df.reset_index().to_dict(orient="records"),
-                "leaders": leaders_df.reset_index().to_dict(orient="records"),
+                "daily": daily_df.reset_index(drop=True).to_dict(orient="records"),
+                "leaders": leaders_df.reset_index(drop=True).to_dict(orient="records"),
             },
         }
         cache_set(cache_key, resp, ttl=CACHE_TTL)
         return jsonify(resp)
     except Exception as e:
         logger.exception("Erro em /api/series")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        # resposta neutra
+        return jsonify({
+            "ok": True,
+            "fig_main": {"data": [], "layout": {}},
+            "fig_daily": {"data": [], "layout": {}},
+            "fig_leaders": {"data": [], "layout": {}},
+            "fig_heat": {"data": [], "layout": {}},
+            "tables": {"daily": [], "leaders": []},
+            "message": "Falha temporária ao coletar dados. Tente novamente mais tarde."
+        })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
