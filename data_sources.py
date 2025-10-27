@@ -30,12 +30,19 @@ PLAYER_MAP = {
 }
 
 def _read_html_tables(url):
-    """Lê todas as tabelas da página com fallback e tolerância a mudanças."""
-    for attempt in range(2):
+    """Lê todas as tabelas da página com BeautifulSoup+html5lib (sem lxml) e com tolerância a mudanças."""
+    import pandas as pd
+    for attempt in range(3):
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
             r.raise_for_status()
-            tables = pd.read_html(r.text, thousands=".", decimal=",")
+            # Usa o parser 'html5lib' via BeautifulSoup (flavor='bs4')
+            tables = pd.read_html(
+                r.text,
+                flavor="bs4",          # força BeautifulSoup
+                thousands=".",         # separador de milhar BR
+                decimal=",",           # decimal BR
+            )
             if tables:
                 return tables
         except Exception as e:
