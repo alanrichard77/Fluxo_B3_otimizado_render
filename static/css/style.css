@@ -1,7 +1,87 @@
-body { font-family: Arial, sans-serif; background-color: #f4f4f4; }
-.container { max-width: 800px; margin: 60px auto; background: white; padding: 40px; border-radius: 10px; text-align: center; }
-input[type="password"] { padding: 10px; width: 60%; margin-bottom: 15px; }
-button { padding: 10px 25px; font-size: 16px; background-color: #152955; color: white; border: none; border-radius: 5px; cursor: pointer; }
-button:hover { background-color: #1d3a7a; }
-.erro { color: red; font-weight: bold; }
-.grafico img { max-width: 100%; border: 1px solid #ccc; margin-top: 20px; border-radius: 5px; }
+:root{
+  --bg:#0b1220;
+  --panel:#10192e;
+  --card:#0f1629;
+  --text:#eaeef7;
+  --muted:#9fb0d3;
+  --accent:#6da8ff;
+  --shadow:0 10px 30px rgba(0,0,0,.25);
+  --radius:18px;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:linear-gradient(180deg,#0b1220,#0b1220 40%,#0f1629);
+  color:var(--text);
+  font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;
+}
+
+.container{max-width:1180px;margin:0 auto;padding:28px}
+
+header{text-align:center;margin-bottom:20px}
+h1{margin:0;font-weight:800;letter-spacing:.2px}
+.subtitle{margin:6px 0 16px;color:var(--muted);font-size:.95rem}
+
+#btnRefresh{
+  border:0;
+  background:#1c2a4b;
+  color:#cfe1ff;
+  padding:10px 14px;
+  border-radius:12px;
+  cursor:pointer;
+  box-shadow:var(--shadow);
+}
+
+.cards{
+  display:grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap:14px;
+  margin:18px 0 8px;
+}
+
+.card{
+  background:var(--card);
+  border:1px solid #1b2542;
+  border-radius:var(--radius);
+  padding:14px;
+  box-shadow:var(--shadow);
+}
+
+.card h4{margin:0 0 8px;color:#aecdff;font-weight:700}
+.card .value{font-size:1.2rem;font-weight:800}
+.card .hint{font-size:.85rem;color:#88c392}
+
+.charts{margin-top:14px}
+.chart-card{
+  background:var(--panel);
+  border:1px solid #1b2542;
+  border-radius:var(--radius);
+  padding:12px;
+  margin-bottom:16px;
+  box-shadow:var(--shadow);
+}
+
+.chart-card h3{margin:0 0 8px;font-weight:700;color:#cfe1ff}
+
+.chart-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:16px;
+}
+
+footer{
+  text-align:center;
+  margin:12px 0 0;
+  color:var(--muted);
+  font-size:.85rem;
+}
+
+.watermark{
+  position:relative;
+  margin:0 auto 8px;
+  width:max-content;
+  opacity:.15;
+  font-weight:800;
+  letter-spacing:.5px;
+}
