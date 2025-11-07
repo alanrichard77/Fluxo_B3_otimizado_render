@@ -2,6 +2,7 @@ import os
 import time
 import logging
 from datetime import datetime, timedelta
+from io import StringIO
 
 import numpy as np
 import pandas as pd
@@ -24,19 +25,28 @@ HEADERS = {
 }
 TIMEOUT = 20
 
-# ===== Snapshot local em CSV (sem dependências extras) =====
-SNAPSHOT_PATH = os.path.join(os.path.dirname(__file__), "players_snapshot.csv")
+# ===== Snapshot local e remoto =====
+BASE_DIR = os.path.dirname(__file__)
+SNAPSHOT_PATH = os.path.join(BASE_DIR, "players_snapshot.csv")
+# Se você publicar um CSV (date,player,net) no GitHub/raw, passe a URL aqui (env no Render).
+SNAPSHOT_URL = os.environ.get(
+    "SNAPSHOT_URL",
+    # Exemplo: coloque um CSV neste caminho no seu repo ou altere para outro URL
+    "https://raw.githubusercontent.com/alanrichard77/Fluxo_B3_otimizado_render/main/players_snapshot.csv",
+)
 
 
 def _save_snapshot(df: pd.DataFrame) -> None:
     try:
         if df is not None and not df.empty:
-            df.to_csv(SNAPSHOT_PATH, index=False)
+            # garantimos apenas as colunas esperadas
+            cols = [c for c in ["date", "player", "net"] if c in df.columns]
+            df[cols].to_csv(SNAPSHOT_PATH, index=False)
     except Exception as e:
         logger.warning("Falha ao salvar snapshot: %s", e)
 
 
-def _load_snapshot() -> pd.DataFrame | None:
+def _load_snapshot_local() -> pd.DataFrame | None:
     try:
         if os.path.exists(SNAPSHOT_PATH):
             df = pd.read_csv(SNAPSHOT_PATH)
@@ -44,8 +54,32 @@ def _load_snapshot() -> pd.DataFrame | None:
                 df["date"] = pd.to_datetime(df["date"]).dt.date
                 return df[["date", "player", "net"]]
     except Exception as e:
-        logger.warning("Falha ao carregar snapshot: %s", e)
+        logger.warning("Falha ao carregar snapshot local: %s", e)
     return None
+
+
+def _load_snapshot_remote() -> pd.DataFrame | None:
+    try:
+        if not SNAPSHOT_URL or not SNAPSHOT_URL.startswith("http"):
+            return None
+        r = requests.get(SNAPSHOT_URL, headers=HEADERS, timeout=TIMEOUT)
+        if r.status_code != 200 or not r.text:
+            return None
+        df = pd.read_csv(StringIO(r.text))
+        if {"date", "player", "net"}.issubset(df.columns):
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            return df[["date", "player", "net"]]
+    except Exception as e:
+        logger.warning("Falha ao carregar snapshot remoto: %s", e)
+    return None
+
+
+def _load_snapshot() -> pd.DataFrame | None:
+    # Preferimos remoto (se existir e estiver atualizado), depois local.
+    df = _load_snapshot_remote()
+    if df is not None and not df.empty:
+        return df
+    return _load_snapshot_local()
 
 
 # ===== Normalização de players =====
@@ -81,12 +115,13 @@ def _fmt_brl_bi(x):
 
 # ===== HTML reader sem lxml =====
 def _read_html_tables(url: str):
-    """Lê tabelas via BeautifulSoup+html5lib com tolerância."""
+    """Lê tabelas via BeautifulSoup+html5lib (sem lxml). Se não houver tabela, levanta erro."""
     for attempt in range(3):
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
             r.raise_for_status()
-            tables = pd.read_html(r.text, flavor="bs4", thousands=".", decimal=",")
+            # Usamos StringIO para evitar FutureWarning de literal HTML
+            tables = pd.read_html(StringIO(r.text), flavor="bs4", thousands=".", decimal=",")
             if tables:
                 return tables
         except Exception as e:
@@ -178,7 +213,7 @@ def _get_players_from_bhm() -> pd.DataFrame | None:
 def get_daily_flows_cards():
     """
     Cards do acumulado no ano por player.
-    Fontes -> snapshot -> zeros. Nunca lança exceção.
+    Fontes -> snapshot (remoto/local) -> zeros. Nunca lança exceção.
     """
     df = _get_players_from_carteirafundos()
     if df is None or df.empty:
@@ -191,7 +226,7 @@ def get_daily_flows_cards():
         return {"ok": True, "cards": {
             "Estrangeiro": zero, "Institucional": zero, "Pessoa Física": zero,
             "Inst. Financeira": zero, "Outros": zero
-        }}
+        }, "source": "empty"}
 
     df["player"] = df["player"].apply(_normalize_player)
     df = df.groupby(["date", "player"], as_index=False)["net"].sum()
@@ -209,17 +244,18 @@ def get_daily_flows_cards():
         v = float(last.loc[last["player"] == pl, "acumulado_ano"].values[0]) if pl in last["player"].values else 0.0
         cards[pl] = {"valor": v, "texto": "Entrada líquida" if v >= 0 else "Saída líquida", "formatado": _fmt_brl_bi(v)}
 
+    # snapshot local para próximos fallbacks
     try:
         _save_snapshot(df[["date", "player", "net"]])
     except Exception:
         pass
 
-    return {"ok": True, "cards": cards}
+    return {"ok": True, "cards": cards, "source": "live"}
 
 
 def get_series_by_player() -> pd.DataFrame:
     """
-    Série (date, player, net). Tolerante: fontes -> snapshot -> vazio.
+    Série (date, player, net). Tolerante: fontes -> snapshot (remoto/local) -> vazio.
     """
     df1 = _get_players_from_carteirafundos()
     df2 = _get_players_from_bhm()
@@ -254,5 +290,6 @@ def get_ibov_series(period_days: int = 365 * 2):
         s["date"] = s["date"].dt.date
         return s
     except Exception as e:
+        # yfinance pode rate-limitar; apenas avisa e segue sem IBOV
         logger.warning("Falha ao carregar IBOV: %s", e)
         return None
