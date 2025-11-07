@@ -1,19 +1,20 @@
 import time
-from typing import Any, Optional
 
-_CACHE = {}
+_cache = {}
 
-def cache_get(key: str) -> Optional[Any]:
-    now = time.time()
-    item = _CACHE.get(key)
+def cache_get(key):
+    item = _cache.get(key)
     if not item:
         return None
-    val, exp = item
-    if exp is not None and now > exp:
-        _CACHE.pop(key, None)
+    value, expire = item
+    if expire and time.time() > expire:
+        _cache.pop(key, None)
         return None
-    return val
+    return value
 
-def cache_set(key: str, value: Any, ttl: int = 3600):
-    exp = time.time() + ttl if ttl else None
-    _CACHE[key] = (value, exp)
+def cache_set(key, value, TTL=3600):
+    expire = time.time() + TTL if TTL else None
+    _cache[key] = (value, expire)
+
+def cache_clear():
+    _cache.clear()
