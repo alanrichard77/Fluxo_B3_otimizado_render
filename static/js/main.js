@@ -35,6 +35,15 @@ async function renderCards(){
     el.insertAdjacentHTML("beforeend", cardTemplate("Pessoa Física", c["Pessoa Física"]?.valor || 0, c["Pessoa Física"]?.texto));
     el.insertAdjacentHTML("beforeend", cardTemplate("Inst. Financeira", c["Inst. Financeira"]?.valor || 0, c["Inst. Financeira"]?.texto));
     el.insertAdjacentHTML("beforeend", cardTemplate("Outros", c["Outros"]?.valor || 0, c["Outros"]?.texto));
+
+    // Banner de modo snapshot (quando /api/cards avisa source)
+    const banner = document.getElementById("banner");
+    if(data.source && data.source !== "live"){
+      banner.style.display = "block";
+      banner.textContent = "Exibindo dados de snapshot. Configure a variável SNAPSHOT_URL para apontar para um CSV atualizado.";
+    }else{
+      banner.style.display = "none";
+    }
   }catch(e){
     el.innerHTML = `<div class="card"><h4>Erro</h4><div class="hint">${e.message}</div></div>`;
   }
