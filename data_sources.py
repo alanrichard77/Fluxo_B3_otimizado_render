@@ -25,26 +25,46 @@ HEADERS = {
 }
 TIMEOUT = 20
 
-# ===== Snapshot local e remoto =====
 BASE_DIR = os.path.dirname(__file__)
 SNAPSHOT_PATH = os.path.join(BASE_DIR, "players_snapshot.csv")
-# Se você publicar um CSV (date,player,net) no GitHub/raw, passe a URL aqui (env no Render).
 SNAPSHOT_URL = os.environ.get(
     "SNAPSHOT_URL",
-    # Exemplo: coloque um CSV neste caminho no seu repo ou altere para outro URL
     "https://raw.githubusercontent.com/alanrichard77/Fluxo_B3_otimizado_render/main/players_snapshot.csv",
 )
 
+PLAYER_MAP = {
+    "Estrangeiro": "Estrangeiro",
+    "Investidor Estrangeiro": "Estrangeiro",
+    "Institucional": "Institucional",
+    "Investidor Institucional": "Institucional",
+    "Pessoa Física": "Pessoa Física",
+    "Pessoa Fisica": "Pessoa Física",
+    "Instituição Financeira": "Inst. Financeira",
+    "Instituicao Financeira": "Inst. Financeira",
+    "Financeira": "Inst. Financeira",
+    "Outros": "Outros",
+}
+
+def _normalize_player(name):
+    if pd.isna(name):
+        return None
+    return PLAYER_MAP.get(str(name).strip(), str(name).strip())
+
+def _fmt_brl_bi(x):
+    try:
+        v = abs(float(x))
+    except Exception:
+        return "R$ 0,0bi"
+    sign = "-" if float(x) < 0 else ""
+    return f"{sign}R$ {v:,.1f}bi".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def _save_snapshot(df: pd.DataFrame) -> None:
     try:
         if df is not None and not df.empty:
-            # garantimos apenas as colunas esperadas
             cols = [c for c in ["date", "player", "net"] if c in df.columns]
             df[cols].to_csv(SNAPSHOT_PATH, index=False)
     except Exception as e:
         logger.warning("Falha ao salvar snapshot: %s", e)
-
 
 def _load_snapshot_local() -> pd.DataFrame | None:
     try:
@@ -56,7 +76,6 @@ def _load_snapshot_local() -> pd.DataFrame | None:
     except Exception as e:
         logger.warning("Falha ao carregar snapshot local: %s", e)
     return None
-
 
 def _load_snapshot_remote() -> pd.DataFrame | None:
     try:
@@ -73,54 +92,14 @@ def _load_snapshot_remote() -> pd.DataFrame | None:
         logger.warning("Falha ao carregar snapshot remoto: %s", e)
     return None
 
-
 def _load_snapshot() -> pd.DataFrame | None:
-    # Preferimos remoto (se existir e estiver atualizado), depois local.
-    df = _load_snapshot_remote()
-    if df is not None and not df.empty:
-        return df
-    return _load_snapshot_local()
+    return _load_snapshot_remote() or _load_snapshot_local()
 
-
-# ===== Normalização de players =====
-PLAYER_MAP = {
-    "Estrangeiro": "Estrangeiro",
-    "Investidor Estrangeiro": "Estrangeiro",
-    "Institucional": "Institucional",
-    "Investidor Institucional": "Institucional",
-    "Pessoa Física": "Pessoa Física",
-    "Pessoa Fisica": "Pessoa Física",
-    "Instituição Financeira": "Inst. Financeira",
-    "Instituicao Financeira": "Inst. Financeira",
-    "Financeira": "Inst. Financeira",
-    "Outros": "Outros",
-}
-
-
-def _normalize_player(name):
-    if pd.isna(name):
-        return None
-    name = str(name).strip()
-    return PLAYER_MAP.get(name, name)
-
-
-def _fmt_brl_bi(x):
-    try:
-        v = abs(float(x))
-    except Exception:
-        return "R$ 0,0bi"
-    sign = "-" if float(x) < 0 else ""
-    return f"{sign}R$ {v:,.1f}bi".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-# ===== HTML reader sem lxml =====
 def _read_html_tables(url: str):
-    """Lê tabelas via BeautifulSoup+html5lib (sem lxml). Se não houver tabela, levanta erro."""
     for attempt in range(3):
         try:
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
             r.raise_for_status()
-            # Usamos StringIO para evitar FutureWarning de literal HTML
             tables = pd.read_html(StringIO(r.text), flavor="bs4", thousands=".", decimal=",")
             if tables:
                 return tables
@@ -129,8 +108,6 @@ def _read_html_tables(url: str):
             time.sleep(1 + attempt)
     raise RuntimeError(f"Não foi possível extrair tabelas de {url}")
 
-
-# ===== Fontes =====
 def _get_players_from_carteirafundos() -> pd.DataFrame | None:
     url = "https://carteirafundos.com.br/fluxo"
     try:
@@ -149,10 +126,8 @@ def _get_players_from_carteirafundos() -> pd.DataFrame | None:
         df = best.rename(columns={date_col: "date"})
 
         player_cols = [c for c in df.columns if c != "date"]
-        melted = df.melt(
-            id_vars=["date"], value_vars=player_cols,
-            var_name="player_raw", value_name="net_raw"
-        )
+        melted = df.melt(id_vars=["date"], value_vars=player_cols,
+                         var_name="player_raw", value_name="net_raw")
         melted["player"] = melted["player_raw"].apply(_normalize_player)
 
         if not np.issubdtype(melted["net_raw"].dtype, np.number):
@@ -169,7 +144,6 @@ def _get_players_from_carteirafundos() -> pd.DataFrame | None:
     except Exception as e:
         logger.warning("Falha carteirafundos: %s", e)
         return None
-
 
 def _get_players_from_bhm() -> pd.DataFrame | None:
     url = "https://www.bhmoptions.com.br/participantes"
@@ -188,10 +162,8 @@ def _get_players_from_bhm() -> pd.DataFrame | None:
 
         df = best.rename(columns={date_col: "date"})
         player_cols = [c for c in df.columns if c != "date"]
-        melted = df.melt(
-            id_vars=["date"], value_vars=player_cols,
-            var_name="player_raw", value_name="net_raw"
-        )
+        melted = df.melt(id_vars=["date"], value_vars=player_cols,
+                         var_name="player_raw", value_name="net_raw")
         melted["player"] = melted["player_raw"].apply(_normalize_player)
 
         melted["net"] = (
@@ -208,13 +180,7 @@ def _get_players_from_bhm() -> pd.DataFrame | None:
         logger.warning("Falha BHM: %s", e)
         return None
 
-
-# ===== API pública =====
 def get_daily_flows_cards():
-    """
-    Cards do acumulado no ano por player.
-    Fontes -> snapshot (remoto/local) -> zeros. Nunca lança exceção.
-    """
     df = _get_players_from_carteirafundos()
     if df is None or df.empty:
         df = _get_players_from_bhm()
@@ -226,7 +192,7 @@ def get_daily_flows_cards():
         return {"ok": True, "cards": {
             "Estrangeiro": zero, "Institucional": zero, "Pessoa Física": zero,
             "Inst. Financeira": zero, "Outros": zero
-        }, "source": "empty"}
+        }}
 
     df["player"] = df["player"].apply(_normalize_player)
     df = df.groupby(["date", "player"], as_index=False)["net"].sum()
@@ -244,19 +210,14 @@ def get_daily_flows_cards():
         v = float(last.loc[last["player"] == pl, "acumulado_ano"].values[0]) if pl in last["player"].values else 0.0
         cards[pl] = {"valor": v, "texto": "Entrada líquida" if v >= 0 else "Saída líquida", "formatado": _fmt_brl_bi(v)}
 
-    # snapshot local para próximos fallbacks
     try:
         _save_snapshot(df[["date", "player", "net"]])
     except Exception:
         pass
 
-    return {"ok": True, "cards": cards, "source": "live"}
-
+    return {"ok": True, "cards": cards}
 
 def get_series_by_player() -> pd.DataFrame:
-    """
-    Série (date, player, net). Tolerante: fontes -> snapshot (remoto/local) -> vazio.
-    """
     df1 = _get_players_from_carteirafundos()
     df2 = _get_players_from_bhm()
     base = df1 if (df1 is not None and not df1.empty) else df2
@@ -276,9 +237,7 @@ def get_series_by_player() -> pd.DataFrame:
 
     return base
 
-
 def get_ibov_series(period_days: int = 365 * 2):
-    """Fechamentos do Ibovespa (yfinance). Pode retornar None."""
     try:
         end = datetime.utcnow()
         start = end - timedelta(days=period_days + 10)
@@ -290,6 +249,5 @@ def get_ibov_series(period_days: int = 365 * 2):
         s["date"] = s["date"].dt.date
         return s
     except Exception as e:
-        # yfinance pode rate-limitar; apenas avisa e segue sem IBOV
         logger.warning("Falha ao carregar IBOV: %s", e)
         return None
