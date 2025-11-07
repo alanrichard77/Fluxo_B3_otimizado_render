@@ -1,10 +1,15 @@
-import os
 import logging
+import os
 from datetime import datetime, timedelta
+
 from flask import Flask, render_template, jsonify, request
 
-from cache_utils import cache_get, cache_set
-import data_sources as ds  # import do módulo inteiro para evitar ImportError
+from cache_utils import cache_get, cache_set, cache_clear
+from data_sources import (
+    get_daily_flows_cards,
+    get_series_by_player,
+    get_ibov_series,
+)
 from processors import (
     build_accumulated_df,
     build_daily_table,
@@ -19,6 +24,7 @@ from charts import (
 )
 from utils import to_plotly_json, parse_date
 
+# ===== Flask =====
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
 
@@ -31,139 +37,91 @@ DEFAULT_DAYS = 180  # janela padrão
 CACHE_TTL = 60 * 60  # 1 hora
 
 
-# ===== Wrappers seguros (não quebram a app caso data_sources falhe) =====
-def _safe_cards():
-    try:
-        if hasattr(ds, "get_daily_flows_cards"):
-            return ds.get_daily_flows_cards()
-    except Exception:
-        logger.exception("safe_cards falhou")
-    zero = {"valor": 0.0, "texto": "Sem dados recentes", "formatado": "R$ 0,0bi"}
-    return {"ok": True, "cards": {
-        "Estrangeiro": zero, "Institucional": zero, "Pessoa Física": zero,
-        "Inst. Financeira": zero, "Outros": zero
-    }}
-
-
-def _safe_series_by_player():
-    import pandas as pd
-    try:
-        if hasattr(ds, "get_series_by_player"):
-            return ds.get_series_by_player()
-    except Exception:
-        logger.exception("safe_series_by_player falhou")
-    return pd.DataFrame(columns=["date", "player", "net"])
-
-
-def _safe_ibov():
-    try:
-        if hasattr(ds, "get_ibov_series"):
-            return ds.get_ibov_series()
-    except Exception as e:
-        logger.warning("safe_ibov falhou: %s", e)
-    return None
-
-
-# ===== Rotas =====
 @app.route("/")
 def index():
     return render_template("index.html")
 
 
-@app.route("/api/refresh", methods=["POST"])
-def refresh():
-    cache_set("last_refresh", datetime.utcnow().isoformat(), ttl=5)
-    return jsonify({"ok": True, "msg": "Atualização solicitada com sucesso."})
-
-
 @app.route("/api/cards")
 def api_cards():
     try:
-        cache_key = "cards_v1"
+        cache_key = "cards"
         cached = cache_get(cache_key)
-        if cached:
+        if cached is not None:
             return jsonify(cached)
-        cards = _safe_cards()
-        cache_set(cache_key, cards, ttl=CACHE_TTL)
+
+        cards = get_daily_flows_cards()
+        # resposta já vem pronta
+        cache_set(cache_key, cards, TTL=CACHE_TTL)
         return jsonify(cards)
-    except Exception:
+    except Exception as e:
         logger.exception("Erro em /api/cards")
-        return jsonify(_safe_cards())
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/series")
 def api_series():
     try:
-        start = parse_date(request.args.get("start"))
-        end = parse_date(request.args.get("end"))
-        days = int(request.args.get("days", DEFAULT_DAYS))
-        if not end:
+        # datas
+        end_str = request.args.get("end")
+        start_str = request.args.get("start")
+        if not end_str:
             end = datetime.utcnow().date()
-        if not start:
-            start = end - timedelta(days=days)
+        else:
+            end = parse_date(end_str).date()
 
-        cache_key = f"series_v1_{start}_{end}"
+        if not start_str:
+            start = end - timedelta(days=DEFAULT_DAYS)
+        else:
+            start = parse_date(start_str).date()
+
+        cache_key = f"series:{start.isoformat()}:{end.isoformat()}"
         cached = cache_get(cache_key)
-        if cached:
+        if cached is not None:
             return jsonify(cached)
 
-        players_df = _safe_series_by_player()
-        ibov = _safe_ibov()
+        # fontes
+        players = get_series_by_player()  # date, player, net
+        players = players[(players["date"] >= start) & (players["date"] <= end)]
 
-        # Sem dados: devolve estrutura neutra, sem 500
-        if players_df is None or players_df.empty:
-            resp = {
-                "ok": True, "start": str(start), "end": str(end),
-                "fig_main": {"data": [], "layout": {}},
-                "fig_daily": {"data": [], "layout": {}},
-                "fig_leaders": {"data": [], "layout": {}},
-                "fig_heat": {"data": [], "layout": {}},
-                "tables": {"daily": [], "leaders": []},
-                "message": "Sem dados recentes para o intervalo selecionado."
-            }
-            cache_set(cache_key, resp, ttl=300)
-            return jsonify(resp)
+        ibov = get_ibov_series(period_days=(end - start).days + 10)
 
-        # Processamento
-        acc_df = build_accumulated_df(players_df, start, end)
-        daily_df = build_daily_table(players_df, start, end)
-        hm_df = build_heatmap_df(daily_df)
-        leaders_df = build_monthly_leaders(daily_df)
+        # processamentos
+        acc_df = build_accumulated_df(players, ibov)
+        daily_df = build_daily_table(players)
+        leaders_df = build_monthly_leaders(players)
+        heat_df = build_heatmap_df(players)
 
-        # Gráficos
-        fig_main = fig_main_accumulated_with_ibov(acc_df, ibov)
-        fig_daily = fig_daily_bars_by_player(daily_df)
-        fig_leaders = fig_monthly_leaders(leaders_df)
-        fig_heat = fig_daily_heatmap(hm_df)
+        # gráficos
+        f1 = to_plotly_json(fig_main_accumulated_with_ibov(acc_df))
+        f2 = to_plotly_json(fig_daily_bars_by_player(daily_df))
+        f3 = to_plotly_json(fig_monthly_leaders(leaders_df))
+        f4 = to_plotly_json(fig_daily_heatmap(heat_df))
 
-        resp = {
+        payload = {
             "ok": True,
-            "start": str(start),
-            "end": str(end),
-            "fig_main": to_plotly_json(fig_main),
-            "fig_daily": to_plotly_json(fig_daily),
-            "fig_leaders": to_plotly_json(fig_leaders),
-            "fig_heat": to_plotly_json(fig_heat),
-            "tables": {
-                "daily": daily_df.reset_index(drop=True).to_dict(orient="records"),
-                "leaders": leaders_df.reset_index(drop=True).to_dict(orient="records"),
-            },
+            "fig_main": f1,
+            "fig_daily": f2,
+            "fig_leaders": f3,
+            "fig_heat": f4,
         }
-        cache_set(cache_key, resp, ttl=CACHE_TTL)
-        return jsonify(resp)
-    except Exception:
+        cache_set(cache_key, payload, TTL=CACHE_TTL)
+        return jsonify(payload)
+    except Exception as e:
         logger.exception("Erro em /api/series")
-        return jsonify({
-            "ok": True,
-            "fig_main": {"data": [], "layout": {}},
-            "fig_daily": {"data": [], "layout": {}},
-            "fig_leaders": {"data": [], "layout": {}},
-            "fig_heat": {"data": [], "layout": {}},
-            "tables": {"daily": [], "leaders": []},
-            "message": "Falha temporária ao coletar dados. Tente novamente mais tarde."
-        })
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/refresh", methods=["POST"])
+def api_refresh():
+    try:
+        cache_clear()
+        return jsonify({"ok": True, "message": "cache limpo"})
+    except Exception as e:
+        logger.exception("Erro em /api/refresh")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
