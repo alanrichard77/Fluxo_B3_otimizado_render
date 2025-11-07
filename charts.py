@@ -1,83 +1,138 @@
 import plotly.graph_objects as go
 import pandas as pd
 
-WM = "@alan_richard"
-
-
-def _watermark(fig):
-    fig.add_annotation(
-        text=WM, xref="paper", yref="paper", x=0.5, y=0.5,
-        showarrow=False, font=dict(size=28), opacity=0.12
-    )
-    return fig
-
-
-def _layout_base(fig, title=""):
+def _empty_fig():
+    fig = go.Figure()
+    # layout transparente, o JS já injeta anotação "Sem dados recentes" se vier vazio
     fig.update_layout(
-        title=title,
-        template="plotly_dark",
-        paper_bgcolor="#0b1220",
-        plot_bgcolor="#0f1629",
-        margin=dict(l=50, r=50, t=40, b=40),
-        legend=dict(orientation="h", y=-0.2),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.07)"),
-        font=dict(size=12),
+        template={},
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#dbe7ff"),
+        margin=dict(l=50, r=10, t=10, b=40),
     )
     return fig
 
-
-def fig_main_accumulated_with_ibov(acc_df, ibov_df):
+def fig_main_accumulated_with_ibov(acc_tuple):
+    acc_players, ibov_norm = acc_tuple
     fig = go.Figure()
-    if acc_df is not None and not acc_df.empty:
-        for col in acc_df.columns:
-            if col == "date":
-                continue
-            fig.add_trace(go.Scatter(x=acc_df["date"], y=acc_df[col], mode="lines", name=col))
 
-        if ibov_df is not None and not ibov_df.empty:
-            merged = pd.DataFrame({"date": acc_df["date"]}).merge(ibov_df, on="date", how="left").ffill()
-            ref = merged["close"].dropna()
-            if len(ref) > 0:
-                base = ref.iloc[0]
-                scale = acc_df.select_dtypes(include=["number"]).to_numpy().max() * 0.9 if acc_df.shape[1] > 1 else 1.0
-                ibov_norm = (merged["close"] / base) * scale
-                fig.add_trace(go.Scatter(
-                    x=acc_df["date"], y=ibov_norm, mode="lines",
-                    name="Ibovespa, eixo normalizado", line=dict(dash="dot")
-                ))
-    _layout_base(fig)
-    _watermark(fig)
+    if acc_players is not None and not acc_players.empty:
+        for col in acc_players.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=acc_players.index,
+                    y=acc_players[col],
+                    mode="lines",
+                    name=col,
+                )
+            )
+
+    if ibov_norm is not None and not ibov_norm.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=ibov_norm.index,
+                y=ibov_norm["value"],
+                mode="lines",
+                name="Ibovespa (normalizado)",
+                line=dict(dash="dot"),
+                yaxis="y2",
+            )
+        )
+
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#dbe7ff"),
+        margin=dict(l=50, r=60, t=10, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        yaxis=dict(title="Acumulado (R$ bi)"),
+        yaxis2=dict(title="Ibov (base 100)", overlaying="y", side="right", showgrid=False),
+    )
+
+    return fig if (fig.data and len(fig.data) > 0) else _empty_fig()
+
+def fig_daily_bars_by_player(daily_df: pd.DataFrame):
+    if daily_df is None or daily_df.empty:
+        return _empty_fig()
+
+    fig = go.Figure()
+    for col in daily_df.columns:
+        fig.add_trace(
+            go.Bar(
+                x=daily_df.index,
+                y=daily_df[col],
+                name=col
+            )
+        )
+
+    fig.update_layout(
+        barmode="relative",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#dbe7ff"),
+        margin=dict(l=50, r=10, t=10, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        yaxis=dict(title="Diário (R$ bi)"),
+    )
     return fig
 
+def fig_monthly_leaders(leaders_df: pd.DataFrame):
+    if leaders_df is None or leaders_df.empty:
+        return _empty_fig()
 
-def fig_daily_bars_by_player(daily_df):
+    leaders_df = leaders_df.sort_values("month")
     fig = go.Figure()
-    if daily_df is not None and not daily_df.empty:
-        piv = daily_df.pivot_table(index="date", columns="player", values="net", aggfunc="sum").fillna(0)
-        for col in piv.columns:
-            fig.add_trace(go.Bar(x=piv.index, y=piv[col], name=col))
-        fig.update_layout(barmode="relative")
-    _layout_base(fig, title="")
-    _watermark(fig)
+
+    fig.add_trace(
+        go.Bar(
+            x=leaders_df["month"],
+            y=leaders_df["top_buyer_value"],
+            name="Maior comprador",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=leaders_df["month"],
+            y=leaders_df["top_seller_value"],
+            name="Maior vendedor",
+        )
+    )
+
+    # rótulos com o nome do player no hover
+    fig.update_traces(
+        hovertemplate="<b>%{x|%b/%Y}</b><br>%{y:.2f} bi"
+    )
+
+    fig.update_layout(
+        barmode="group",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#dbe7ff"),
+        margin=dict(l=50, r=10, t=10, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        yaxis=dict(title="Saldo mensal (R$ bi)"),
+    )
     return fig
 
+def fig_daily_heatmap(heat_df: pd.DataFrame):
+    if heat_df is None or heat_df.empty:
+        return _empty_fig()
 
-def fig_monthly_leaders(leaders_df):
-    fig = go.Figure()
-    if leaders_df is not None and not leaders_df.empty:
-        fig.add_trace(go.Bar(x=leaders_df["month"], y=leaders_df["saldo_maior_compra"], name="Maior comprador"))
-        fig.add_trace(go.Bar(x=leaders_df["month"], y=leaders_df["saldo_maior_venda"], name="Maior vendedor"))
-        fig.update_layout(barmode="group")
-    _layout_base(fig, title="")
-    _watermark(fig)
-    return fig
+    z = heat_df.T.values  # players x dias
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=heat_df.index,
+            y=list(heat_df.columns),
+            colorbar=dict(title="R$ bi"),
+        )
+    )
 
-
-def fig_daily_heatmap(hm_df):
-    fig = go.Figure()
-    if hm_df is not None and not hm_df.empty:
-        fig.add_trace(go.Heatmap(z=hm_df.values, x=hm_df.columns, y=hm_df.index, colorbar=dict(title="R$ bi")))
-    _layout_base(fig, title="")
-    _watermark(fig)
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#dbe7ff"),
+        margin=dict(l=60, r=20, t=10, b=40),
+    )
     return fig
