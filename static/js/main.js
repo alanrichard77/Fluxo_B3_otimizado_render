@@ -19,8 +19,30 @@ function cardTemplate(title, value, hint){
     </div>`;
 }
 
-function ensureFigure(fig){
-  if(!fig || !fig.data){ return {data:[], layout:{}}; }
+function ensureFigure(fig, title){
+  if(!fig || !fig.data || fig.data.length === 0){
+    return {
+      data: [],
+      layout: {
+        template: {},
+        paper_bgcolor: "rgba(0,0,0,0)",
+        plot_bgcolor: "rgba(0,0,0,0)",
+        font: {color:"#dbe7ff"},
+        annotations: [
+          {text:"Sem dados recentes", showarrow:false, x:0.5, y:0.5, xref:"paper", yref:"paper", font:{size:14}}
+        ],
+        margin:{l:50,r:10,t:10,b:40}
+      }
+    };
+  }
+  if(!fig.layout){
+    fig.layout = {paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:"#dbe7ff"}};
+  }else{
+    fig.layout.paper_bgcolor = "rgba(0,0,0,0)";
+    fig.layout.plot_bgcolor = "rgba(0,0,0,0)";
+    fig.layout.font = fig.layout.font || {};
+    fig.layout.font.color = "#dbe7ff";
+  }
   return fig;
 }
 
@@ -35,15 +57,6 @@ async function renderCards(){
     el.insertAdjacentHTML("beforeend", cardTemplate("Pessoa Física", c["Pessoa Física"]?.valor || 0, c["Pessoa Física"]?.texto));
     el.insertAdjacentHTML("beforeend", cardTemplate("Inst. Financeira", c["Inst. Financeira"]?.valor || 0, c["Inst. Financeira"]?.texto));
     el.insertAdjacentHTML("beforeend", cardTemplate("Outros", c["Outros"]?.valor || 0, c["Outros"]?.texto));
-
-    // Banner de modo snapshot (quando /api/cards avisa source)
-    const banner = document.getElementById("banner");
-    if(data.source && data.source !== "live"){
-      banner.style.display = "block";
-      banner.textContent = "Exibindo dados de snapshot. Configure a variável SNAPSHOT_URL para apontar para um CSV atualizado.";
-    }else{
-      banner.style.display = "none";
-    }
   }catch(e){
     el.innerHTML = `<div class="card"><h4>Erro</h4><div class="hint">${e.message}</div></div>`;
   }
