@@ -23,17 +23,6 @@ h1{margin:0;font-weight:800;letter-spacing:.2px}
   border:0;background:#1c2a4b;color:#cfe1ff;padding:10px 14px;
   border-radius:12px;cursor:pointer;box-shadow:var(--shadow);
 }
-.banner{
-  margin:12px auto 0;
-  width:max-content;
-  background:#142245;
-  color:#cfe1ff;
-  border:1px solid #233364;
-  border-radius:12px;
-  padding:8px 12px;
-  font-size:.85rem;
-  box-shadow:var(--shadow);
-}
 
 .cards{
   display:grid;grid-template-columns: repeat(5, 1fr);
